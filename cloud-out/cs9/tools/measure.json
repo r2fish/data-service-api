@@ -1,0 +1,5317 @@
+{
+ "base": "092e1a1",
+ "modules": {
+  "r2db-api/src/r2db_api/structured.py": {
+   "lines": 1867,
+   "blocks_total": 122,
+   "blocks_docstring": 17,
+   "blocks_comment": 105,
+   "helpers": {
+    "validate_enum_declaration": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "enum_member_matches_type": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "normalize_request_for_plan": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "compute_plan_token": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "normalize_request_for_idempotency": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "idempotency_digest": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ]
+   },
+   "helper_nodes": [
+    {
+     "symbol": "enum_member_matches_type",
+     "node": "FunctionDef",
+     "lines": [
+      113,
+      132
+     ],
+     "blocks_inside": [
+      [
+       114,
+       123,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "validate_enum_declaration",
+     "node": "FunctionDef",
+     "lines": [
+      135,
+      175
+     ],
+     "blocks_inside": [
+      [
+       136,
+       163,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "normalize_request_for_plan",
+     "node": "FunctionDef",
+     "lines": [
+      588,
+      606
+     ],
+     "blocks_inside": [
+      [
+       589,
+       604,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "compute_plan_token",
+     "node": "FunctionDef",
+     "lines": [
+      609,
+      633
+     ],
+     "blocks_inside": [
+      [
+       610,
+       631,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "normalize_request_for_idempotency",
+     "node": "FunctionDef",
+     "lines": [
+      646,
+      663
+     ],
+     "blocks_inside": [
+      [
+       647,
+       661,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "idempotency_digest",
+     "node": "FunctionDef",
+     "lines": [
+      694,
+      703
+     ],
+     "blocks_inside": [
+      [
+       695,
+       702,
+       "docstring"
+      ]
+     ]
+    }
+   ],
+   "existing_ch": [
+    {
+     "start": 1603,
+     "end": 1613,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 11,
+     "history_id": "CH-0552"
+    },
+    {
+     "start": 1618,
+     "end": 1622,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 5,
+     "history_id": "CH-0553"
+    },
+    {
+     "start": 1626,
+     "end": 1628,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 3,
+     "history_id": "CH-0554"
+    },
+    {
+     "start": 1646,
+     "end": 1649,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 4,
+     "history_id": "CH-0555"
+    },
+    {
+     "start": 1651,
+     "end": 1655,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 5,
+     "history_id": "CH-0556"
+    },
+    {
+     "start": 1662,
+     "end": 1667,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 6,
+     "history_id": "CH-0557"
+    },
+    {
+     "start": 1670,
+     "end": 1678,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 9,
+     "history_id": "CH-0558"
+    },
+    {
+     "start": 1690,
+     "end": 1694,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 5,
+     "history_id": "CH-0559"
+    },
+    {
+     "start": 1702,
+     "end": 1708,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 7,
+     "history_id": "CH-0560"
+    },
+    {
+     "start": 1722,
+     "end": 1744,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 23,
+     "history_id": "CH-0561"
+    },
+    {
+     "start": 1778,
+     "end": 1781,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 4,
+     "history_id": "CH-0562"
+    },
+    {
+     "start": 1789,
+     "end": 1793,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 5,
+     "history_id": "CH-0563"
+    },
+    {
+     "start": 1831,
+     "end": 1840,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 10,
+     "history_id": "CH-0564"
+    }
+   ],
+   "target_blocks": [
+    {
+     "start": 1,
+     "end": 1,
+     "kind": "docstring",
+     "qualname": "<module>",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 81,
+     "end": 110,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 30,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [],
+     "n_sentences": 8,
+     "marker_sentences": [],
+     "token_sentences": 2,
+     "safety": [
+      {
+       "words": [
+        "commit"
+       ],
+       "sentence": "`DataService` (service.py) carried a provisional gate through WP-2〜WP-5 that kept the HTTP-observable surface matching the then-current `capabilities()` declara"
+      }
+     ],
+     "protected": [
+      "CCR-13 WP-5b: this shared boundary structurally *accepts* the full vocabulary (`expected_revision`, `upsert`, `create_index`/`drop_index`, `field_type`, `matche",
+      "`DataService` (service.py) carried a provisional gate through WP-2〜WP-5 that kept the HTTP-observable surface matching the then-current `capabilities()` declara"
+     ],
+     "position": [],
+     "xref": [
+      "Everything below this point (`validate_projection` through `bind_mutation` now in `mutation_binding.py`) is the boundary every `StorageBackend` MUST cross before touching stored data: identifier synta",
+      "`ApplicationCell` (below) and `PostgresCell` (`r2db_api.postgres`) both call these same functions -- neither backend reimplements this logic privately."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 187,
+     "end": 192,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "identifier"
+       ],
+       "sentence": "WP-2(b) fix round 2 (coordinator item C): reserved by EXACT match at this ONE shared choke point -- every schema operation (create_entity/add_field/drop_entity/"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "WP-2(b) fix round 2 (coordinator item C): reserved by EXACT match at this ONE shared choke point -- every schema operation (create_entity/add_field/drop_entity/"
+     ],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 195,
+     "end": 199,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "previously"
+       ],
+       "sentence": "WP-2 review minor (e): `revision` was previously an accepted-but-unused key (schema-level optimistic locking has no implementation here) -- silently accepting a"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "locking"
+       ],
+       "sentence": "WP-2 review minor (e): `revision` was previously an accepted-but-unused key (schema-level optimistic locking has no implementation here) -- silently accepting a"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "WP-2 review minor (e): `revision` was previously an accepted-but-unused key (schema-level optimistic locking has no implementation here) -- silently accepting a"
+     ],
+     "xref": [
+      "WP-2 review minor (e): `revision` was previously an accepted-but-unused key (schema-level optimistic locking has no implementation here) -- silently accepting and ignoring it is exactly the kind of ga"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 202,
+     "end": 212,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 11,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "this (WP|commit|change set|round)"
+       ],
+       "sentence": "Contract 1.7.0 (D-2 (5), work order §2 WP-2a \"実装の指示\"): `alter_field` redeclares a field's `enum`/`nullable`, never its type -- carrying `field_type` fails the S"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (5), work order §2 WP-2a \"実装の指示\"): `alter_field` redeclares a field's `enum`/`nullable`, never its type -- carrying `field_type` fails the S"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 221,
+     "end": 223,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "Phase 6 WP-2 (design D-3(iv)): `field_types` (the per-field map) is accepted only by `create_entity` -- symmetric with `field_type`'s (the scalar) `add_field`-o"
+     ],
+     "xref": [
+      "Phase 6 WP-2 (design D-3(iv)): `field_types` (the per-field map) is accepted only by `create_entity` -- symmetric with `field_type`'s (the scalar) `add_field`-only rule immediately above."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 226,
+     "end": 228,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` (the per-field map) is accepted only by `create_entity` -- symmetric with `field_types` immediately above."
+     ],
+     "position": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` (the per-field map) is accepted only by `create_entity` -- symmetric with `field_types` immediately above."
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` (the per-field map) is accepted only by `create_entity` -- symmetric with `field_types` immediately above."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 231,
+     "end": 233,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): the scalar `enum`/`nullable` pair is accepted only by `add_field`/`alter_field` -- symmetric with `field_type`'s own `add_field"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): the scalar `enum`/`nullable` pair is accepted only by `add_field`/`alter_field` -- symmetric with `field_type`'s own `add_field"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): the scalar `enum`/`nullable` pair is accepted only by `add_field`/`alter_field` -- symmetric with `field_type`'s own `add_field`-only rule above."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 236,
+     "end": 240,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "WP-2 review M-3: `index`/`unique` are meaningful only to `create_index` (`drop_index` additionally accepts `index` as the name to drop, but never `unique`) -- t"
+     ],
+     "xref": [
+      "WP-2 review M-3: `index`/`unique` are meaningful only to `create_index` (`drop_index` additionally accepts `index` as the name to drop, but never `unique`) -- the same \"don't silently tolerate a key t"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 246,
+     "end": 253,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Review blocker B-1: symmetric with `bind_mutation`'s identical check above (now in `mutation_binding.py`) -- a non-boolean truthy `destructive` (a string, an in"
+     ],
+     "position": [
+      "Review blocker B-1: symmetric with `bind_mutation`'s identical check above (now in `mutation_binding.py`) -- a non-boolean truthy `destructive` (a string, an in"
+     ],
+     "xref": [
+      "Review blocker B-1: symmetric with `bind_mutation`'s identical check above (now in `mutation_binding.py`) -- a non-boolean truthy `destructive` (a string, an int, an object) must never be silently coe"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 272,
+     "end": 277,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "The reserved-name check below operates on an already syntax-valid string (N-1: \"有効な識別子...予約名などはこれまでどおり path に含めてよい\"), so it keeps the precise per-index path as before."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 284,
+     "end": 291,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Three invalid shapes are `VALIDATION_FAILED` (design's own enumeration, all three checked here so the field-name/word checks below never run against a request this repository already knows is malforme"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 293,
+     "end": 298,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "(c) `field_types` sent without `fields` at all -- checked against the RAW request key, not the (always-present, maybe-empty) `raw_fields` local above, so a request that omits `fields` entirely is caug"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 306,
+     "end": 306,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 309,
+     "end": 319,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 11,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [
+      310
+     ],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "`isinstance` checked FIRST (coordinator F2, 2026-09-04 review): `in` against `FIELD_TYPES` (a `set`) raises `TypeError` for an unhashable value (a list/dict) ra"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 322,
+     "end": 325,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Decision (v1.3 G11): an explicitly declared `json` is the SAME internal representation as untyped (`None`) -- see `FIELD_TYPES`'s own module-level comment above (in `schema_binding.py`) for why (NUL-c"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 328,
+     "end": 335,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` is an OPTIONAL, never-required key -- a `create_entity` carrying no `field_constraints` at all stays valid "
+     ],
+     "position": [],
+     "xref": [
+      "Placed AFTER `field_types` above so each field's own declared type (`field_types.get(name)`, `None`/json if that field was never given one) is already resolved for `validate_enum_declaration` below."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 338,
+     "end": 342,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling N-2 (rulings-r2-closure.md, WP-2a closure): `field` names the request-internal key this whole clause hangs off, mirrors the adjacent per-entry br"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "Monitor ruling N-2 (rulings-r2-closure.md, WP-2a closure): `field` names the request-internal key this whole clause hangs off, mirrors the adjacent per-entry br"
+     ],
+     "xref": [
+      "Mirrors `field_types`'s identical \"sent without fields\" check above.",
+      "Monitor ruling N-2 (rulings-r2-closure.md, WP-2a closure): `field` names the request-internal key this whole clause hangs off, mirrors the adjacent per-entry branches below which already load this key"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 350,
+     "end": 351,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling N-2 (rulings-r2-closure.md): same key, same reason as the \"requires fields\" branch above."
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "Monitor ruling N-2 (rulings-r2-closure.md): same key, same reason as the \"requires fields\" branch above."
+     ],
+     "xref": [
+      "Monitor ruling N-2 (rulings-r2-closure.md): same key, same reason as the \"requires fields\" branch above."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 359,
+     "end": 375,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 17,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "差し戻し"
+       ],
+       "sentence": "Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4, 版フリップ監査差し戻し): a `field_constraints` KEY that is itself an identifier-syntax violation must not be echoed i"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "SI-10",
+        "identifier"
+       ],
+       "sentence": "Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4, 版フリップ監査差し戻し): a `field_constraints` KEY that is itself an identifier-syntax violation must not be echoed i"
+      }
+     ],
+     "protected": [
+      "Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4, 版フリップ監査差し戻し): a `field_constraints` KEY that is itself an identifier-syntax violation must not be echoed i"
+     ],
+     "position": [
+      "Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4, 版フリップ監査差し戻し): a `field_constraints` KEY that is itself an identifier-syntax violation must not be echoed i"
+     ],
+     "xref": [
+      "Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4, 版フリップ監査差し戻し): a `field_constraints` KEY that is itself an identifier-syntax violation must not be echoed into `field` (SI-10 -- the key can carry "
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      359
+     ]
+    },
+    {
+     "start": 378,
+     "end": 383,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling m-1 (rulings-wp2a-review.md, contract corrigendum, verbatim list of `constraint_declaration` cases): \"...or a declaration naming a field the requ"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 397,
+     "end": 402,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling E (rulings-wp3a-review.md, applied to r2db by M-3/rulings-wp2a-review.md): an unknown key INSIDE one field's own constraint spec (as opposed to t"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Monitor ruling E (rulings-wp3a-review.md, applied to r2db by M-3/rulings-wp2a-review.md): an unknown key INSIDE one field's own constraint spec (as opposed to t"
+     ],
+     "position": [
+      "Monitor ruling E (rulings-wp3a-review.md, applied to r2db by M-3/rulings-wp2a-review.md): an unknown key INSIDE one field's own constraint spec (as opposed to t"
+     ],
+     "xref": [
+      "Monitor ruling E (rulings-wp3a-review.md, applied to r2db by M-3/rulings-wp2a-review.md): an unknown key INSIDE one field's own constraint spec (as opposed to the field name itself, handled above) is "
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 433,
+     "end": 437,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "Coordinator F2: same isinstance-first guard as create_entity's field_types values above -- closes the identical, pre-existing (not a WP-2 regression) hole on th"
+     ],
+     "xref": [
+      "Coordinator F2: same isinstance-first guard as create_entity's field_types values above -- closes the identical, pre-existing (not a WP-2 regression) hole on this scalar sibling in the same fix, per t"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 441,
+     "end": 442,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Decision (v1.3 G11): same json->None translation as create_entity's `field_types` values above."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 444,
+     "end": 448,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `add_field`'s own single-field `enum`/`nullable`, validated against THIS SAME request's own `field_type` (already resolved abov"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `add_field`'s own single-field `enum`/`nullable`, validated against THIS SAME request's own `field_type` (already resolved abov"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): `add_field`'s own single-field `enum`/`nullable`, validated against THIS SAME request's own `field_type` (already resolved above -- `add_field` declares a brand new fi"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 458,
+     "end": 462,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling A (rulings-wp3a-review.md, applied to r2db by rulings-wp2a-review.md B-2): \"add_field で enum: null = enum 無し\" -- an explicit `null` is the SAME a"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 470,
+     "end": 484,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 15,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Contract 1.7.0 (D-2 (5), WP-2a; monitor ruling A/B-2): `alter_field` redeclares one EXISTING field's `enum`/`nullable` as a PATCH, never a wholesale replace -- "
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (5), WP-2a; monitor ruling A/B-2): `alter_field` redeclares one EXISTING field's `enum`/`nullable` as a PATCH, never a wholesale replace -- "
+     ],
+     "position": [],
+     "xref": [
+      "`field_type` is rejected above (before this branch is ever reached) in the D-3 four-key form."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 488,
+     "end": 496,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 9,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling N-1 (rulings-r2-closure.md, contract corrigendum 3, verbatim): \"An alter_field carrying neither enum nor nullable declares nothing and is refused"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 514,
+     "end": 514,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling A: `enum: null` clears the field's enum."
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 532,
+     "end": 536,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 549,
+     "end": 551,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Ruling N-1: container position (\"fields\"), not the per-index path -- same reasoning as create_entity's fields loop above."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 554,
+     "end": 558,
+     "kind": "comment",
+     "qualname": "bind_schema_operation",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "WP-2 review M-5: `id` is the address, not a domain uniqueness declaration (§2) -- allowing it here would let a peer publish a `unique_keys` entry upsert can nev"
+     ],
+     "position": [
+      "WP-2 review M-5: `id` is the address, not a domain uniqueness declaration (§2) -- allowing it here would let a peer publish a `unique_keys` entry upsert can nev"
+     ],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 579,
+     "end": 585,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [
+      584
+     ],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 2,
+     "safety": [],
+     "protected": [
+      "--- contract 1.7.0 dry_run/plan (D-4, WP-2b) --------------------------------",
+      "Peer symmetry (work order §2 WP-2b \"同型性テストの対象\"): MitateDB-api places its own same-named, same-signature pair in `field_types.py` (the module its own D-2 constra"
+     ],
+     "position": [
+      "Peer symmetry (work order §2 WP-2b \"同型性テストの対象\"): MitateDB-api places its own same-named, same-signature pair in `field_types.py` (the module its own D-2 constra"
+     ],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 636,
+     "end": 643,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [
+      641
+     ],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "this (WP|commit|change set|round)"
+       ],
+       "sentence": "Peer symmetry (work order §2 WP-2c \"同型性テストの対象\"): MitateDB-api places its own same-named, same-signature pair alongside `normalize_request_for_plan`/`compute_pla"
+      }
+     ],
+     "token_sentences": 2,
+     "safety": [
+      {
+       "words": [
+        "commit"
+       ],
+       "sentence": "Peer symmetry (work order §2 WP-2c \"同型性テストの対象\"): MitateDB-api places its own same-named, same-signature pair alongside `normalize_request_for_plan`/`compute_pla"
+      }
+     ],
+     "protected": [
+      "--- contract 1.7.0 idempotency (D-5, WP-2c) ---------------------------------"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 667,
+     "end": 681,
+     "kind": "docstring",
+     "qualname": "fold_operation_idempotency_keys",
+     "n_lines": 15,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 708,
+     "end": 719,
+     "kind": "docstring",
+     "qualname": "_IdempotencyRecord",
+     "n_lines": 12,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 728,
+     "end": 742,
+     "kind": "docstring",
+     "qualname": "_idempotency_record_has_request_id",
+     "n_lines": 15,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      728
+     ]
+    },
+    {
+     "start": 750,
+     "end": 752,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 754,
+     "end": 755,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 757,
+     "end": 765,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 9,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (4), WP-2a): entity -> field_name -> FieldConstraints -- the in-memory backend's own declaration registry (\"プロセス内参照 cell の構造\", no upgrade sc"
+     ],
+     "position": [],
+     "xref": [
+      "Never read/written directly by anything outside this class; `catalog()`/`_apply`/`_apply_upsert`/`apply_schema` below are its only callers."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 768,
+     "end": 777,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Popped when the entity is dropped and starts fresh at 1 if the same name is later recreated (R-1: reuse is scoped to one entity's lifetime, and `apply_schema`'s own atomic rollback below *does* restor"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 779,
+     "end": 786,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-5 (6), U-3 = (A), ruling I-1, WP-2c): the in-memory backend's own idempotency record store -- \"プロセス内 dict\" (never a side table; `PostgresCell`"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 788,
+     "end": 798,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 11,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "before (this|the) (fix|change|ruling|rework|review)"
+       ],
+       "sentence": "Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): this in-memory backend has no database transaction to take a `pg_advisory_xact_lock` inside, so the ana"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "Lock",
+        "transaction"
+       ],
+       "sentence": "Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): this in-memory backend has no database transaction to take a `pg_advisory_xact_lock` inside, so the ana"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): this in-memory backend has no database transaction to take a `pg_advisory_xact_lock` inside, so the ana"
+     ],
+     "xref": [
+      "Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): this in-memory backend has no database transaction to take a `pg_advisory_xact_lock` inside, so the analogous serialization is a cell-wide `thr"
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      788
+     ]
+    },
+    {
+     "start": 821,
+     "end": 823,
+     "kind": "comment",
+     "qualname": "ApplicationCell.__post_init__",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 827,
+     "end": 827,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "---- idempotency (contract 1.7.0 D-5, WP-2c) --------------------------"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 830,
+     "end": 834,
+     "kind": "docstring",
+     "qualname": "ApplicationCell._idempotency_reclaim",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "This is the lazy reclaim -- called from both the lookup and the capacity-reservation paths below, never from a background thread or timer (禁止事項 5: \"背景スレッド・定期ジョブを置かない\")."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 844,
+     "end": 851,
+     "kind": "docstring",
+     "qualname": "ApplicationCell._idempotency_reserve",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 858,
+     "end": 858,
+     "kind": "comment",
+     "qualname": "ApplicationCell",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 876,
+     "end": 881,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "identifier"
+       ],
+       "sentence": "WP-2(b) fix round 2 (coordinator item C): reserved at every identifier position, not only at creation time -- a query against `entity=\"audit_events\"` is refused"
+      }
+     ],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 891,
+     "end": 895,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 898,
+     "end": 901,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 906,
+     "end": 915,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "`request_schema` (like the sibling empty/non-list `in` catch a few lines above) correctly needs no type pair."
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      906
+     ]
+    },
+    {
+     "start": 918,
+     "end": 918,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 925,
+     "end": 928,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 930,
+     "end": 935,
+     "kind": "comment",
+     "qualname": "ApplicationCell.query",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 950,
+     "end": 955,
+     "kind": "docstring",
+     "qualname": "ApplicationCell._describe_entity",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "One entity's `EntityDescriptor` (contract shape) -- factored out of `catalog()` below (WP-2b) so `apply_schema`'s own `dry_run` response can build the identical"
+     ],
+     "xref": [
+      "One entity's `EntityDescriptor` (contract shape) -- factored out of `catalog()` below (WP-2b) so `apply_schema`'s own `dry_run` response can build the identical descriptor for the ONE entity a schema "
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 962,
+     "end": 965,
+     "kind": "comment",
+     "qualname": "ApplicationCell._describe_entity",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 967,
+     "end": 972,
+     "kind": "comment",
+     "qualname": "ApplicationCell._describe_entity",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (1), WP-2a): total over `fields` -- `nullable` always present, `enum` only for a field the registry (`self.field_constraints`) actually carr"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1010,
+     "end": 1016,
+     "kind": "docstring",
+     "qualname": "ApplicationCell.transact",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "lock"
+       ],
+       "sentence": "Ruling U-7 (WP-6d): thin lock wrapper -- `self._idempotency_lock` is held for this call's entire duration, so a concurrent thread calling `transact`/`apply_sche"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "Ruling U-7 (WP-6d): thin lock wrapper -- `self._idempotency_lock` is held for this call's entire duration, so a concurrent thread calling `transact`/`apply_sche"
+     ],
+     "xref": [
+      "Ruling U-7 (WP-6d): thin lock wrapper -- `self._idempotency_lock` is held for this call's entire duration, so a concurrent thread calling `transact`/`apply_schema` on this SAME cell cannot interleave ",
+      "All actual behavior lives in `_transact_locked` below, unchanged."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1039,
+     "end": 1069,
+     "kind": "docstring",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 31,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 5,
+     "marker_sentences": [
+      {
+       "markers": [
+        "no longer"
+       ],
+       "sentence": "A caller-supplied `plan` that no longer matches is a precondition failure (D-4 (2): evaluated after confirmation -- every confirmation check inside `_apply` bel"
+      }
+     ],
+     "token_sentences": 2,
+     "safety": [
+      {
+       "words": [
+        "commit",
+        "rollback"
+       ],
+       "sentence": "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): `dry_run` walks every gate a real request would (no early-out anywhere above or inside this method"
+      }
+     ],
+     "protected": [
+      "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): `dry_run` walks every gate a real request would (no early-out anywhere above or inside this method",
+      "Review round F-5 (`{scratchpad}/rulings-r4.md`): `service.py` builds `plan_request` unconditionally for every mutation, so the digest below is only computed whe"
+     ],
+     "position": [
+      "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): `dry_run` walks every gate a real request would (no early-out anywhere above or inside this method",
+      "Review round F-5 (`{scratchpad}/rulings-r4.md`): `service.py` builds `plan_request` unconditionally for every mutation, so the digest below is only computed whe"
+     ],
+     "xref": [
+      "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): `dry_run` walks every gate a real request would (no early-out anywhere above or inside this method) and this method's own SINGLE tx-exit p",
+      "`plan_request`, when given, is the contract-level request object `service.py` assembled (`entity`/`operations`/`transaction`/`budget`, never `plan`/`dry_run` themselves -- H-1, `{scratchpad}/rulings-r",
+      "A caller-supplied `plan` that no longer matches is a precondition failure (D-4 (2): evaluated after confirmation -- every confirmation check inside `_apply` below already raised, if it was going to, b",
+      "Review round F-5 (`{scratchpad}/rulings-r4.md`): `service.py` builds `plan_request` unconditionally for every mutation, so the digest below is only computed when it is actually consumed -- `dry_run`'s"
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/",
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      1048,
+      1063
+     ]
+    },
+    {
+     "start": 1077,
+     "end": 1085,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 9,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3, WP-2c): the idempotency lookup sits HERE -- after every bound this method's own caller (`service.py`) and t"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3, WP-2c): the idempotency lookup sits HERE -- after every bound this method's own caller (`service.py`) and t"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3, WP-2c): the idempotency lookup sits HERE -- after every bound this method's own caller (`service.py`) and the batch-size bound just above have alre",
+      "A `dry_run` never consults or writes a record at all (ruling I-7 / D-4): the guard below is `idempotency_key is not None and not dry_run`, never merely `idempotency_key is not None`."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1093,
+     "end": 1095,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "L-6/M-6: a record with no `request_id` (pre-1.7.0) is not a usable replay source -- treated as absent, checked before the digest comparison below."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1102,
+     "end": 1104,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Ruling I-3/I-8: answered from the record -- target existence, confirmation, precondition and execution (everything below this point) never run for a replay."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1109,
+     "end": 1112,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-7 (3), WP-2e): the ORIGINAL execution's own `request_id` -- read back from the record's own payload (guaranteed present, M-6: no fallback to t"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1115,
+     "end": 1116,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1129,
+     "end": 1135,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1139,
+     "end": 1144,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1146,
+     "end": 1152,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling M-3/D (rulings-wp2a-review.md, rulings-wp3a-review.md D): `operation_index` is this operation's own position in the request's `operations` list -"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [
+      "Monitor ruling M-3/D (rulings-wp2a-review.md, rulings-wp3a-review.md D): `operation_index` is this operation's own position in the request's `operations` list -"
+     ],
+     "xref": [
+      "Monitor ruling M-3/D (rulings-wp2a-review.md, rulings-wp3a-review.md D): `operation_index` is this operation's own position in the request's `operations` list -- `_apply` below uses it to compose `det"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1159,
+     "end": 1165,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "commit",
+        "rollback"
+       ],
+       "sentence": "Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit point -- plan validity, then commit vs rollback."
+      }
+     ],
+     "protected": [
+      "Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit point -- plan validity, then commit vs rollback."
+     ],
+     "position": [],
+     "xref": [
+      "Reached only once every operation above has tentatively succeeded (every confirmation/precondition/value/limit refusal inside the loop already raised and is handled by the `except Exception` below, re"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1172,
+     "end": 1177,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "D-4 (4)/(6): rollback (never the audit hook -- `service.py` never builds one for a dry_run in the first place, so `audit_hook` is always `None` here) -- the identical single-exit restore the `except E"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1183,
+     "end": 1192,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "commit",
+        "commit_failed"
+       ],
+       "sentence": "Phase 4 (design D-2/D-10): the pre-commit hook is called for every real batch, not only a destructive one, as the LAST thing this method does before its own com"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "Phase 4 (design D-2/D-10): the pre-commit hook is called for every real batch, not only a destructive one, as the LAST thing this method does before its own com"
+     ],
+     "xref": [
+      "A raise here is caught by the `except Exception` below, exactly like any other mid-batch failure -- restoring `before` and propagating (fail-closed by construction, no special-casing needed)."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1195,
+     "end": 1205,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 11,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "commit",
+        "transaction"
+       ],
+       "sentence": "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the SAME critical section as the commit above -- this in-memory backend has no separate transact"
+      }
+     ],
+     "protected": [
+      "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the SAME critical section as the commit above -- this in-memory backend has no separate transact"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the SAME critical section as the commit above -- this in-memory backend has no separate transact"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the SAME critical section as the commit above -- this in-memory backend has no separate transaction boundary (`ApplicationCell` serves o",
+      "If anything below this point still raised, the `except Exception` clause restores `before` -- but no code below this comment can raise (`_idempotency_store` never fails), so a written record and a com"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1209,
+     "end": 1212,
+     "kind": "comment",
+     "qualname": "ApplicationCell._transact_locked",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-7 (3), WP-2e): `request_id` rides in the same payload the replay branch above reads back from -- so a future replay returns THIS execution's o"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-7 (3), WP-2e): `request_id` rides in the same payload the replay branch above reads back from -- so a future replay returns THIS execution's o"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-7 (3), WP-2e): `request_id` rides in the same payload the replay branch above reads back from -- so a future replay returns THIS execution's own `request_id`, not a fresh one."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1225,
+     "end": 1230,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (4), WP-2a): the registry's own entry for this entity -- addendum 2 S-k's 6 write call sites (3 here, 3 in `postgres.py`) all pass THIS thro"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-2 (4), WP-2a): the registry's own entry for this entity -- addendum 2 S-k's 6 write call sites (3 here, 3 in `postgres.py`) all pass THIS thro"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-2 (4), WP-2a): the registry's own entry for this entity -- addendum 2 S-k's 6 write call sites (3 here, 3 in `postgres.py`) all pass THIS through to `_check_type`; the 2 predicate ca"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1232,
+     "end": 1237,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Monitor ruling M-3/D (rulings-wp2a-review.md, D-3 (2)): every `details.field` this method raises for a VALUE-position defect in `bound.values` names the request"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1241,
+     "end": 1246,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Contract 1.7.0 (D-2 (3)(ii), addendum R-c): the \"declared non-nullable field was never given a value at all\" check -- unlike a null VALUE (checked per-value by the choke point, `_check_type` below), a"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1265,
+     "end": 1268,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "update / delete: R-7, corrigendum M-9 -- validate every value's type (predicate values, and for `update` the write values too) before resolving a precondition or searching for target rows at all, symm"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1277,
+     "end": 1286,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "`request_schema` (like the sibling empty/non-list `in` catch a few lines above) correctly needs no type pair."
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      1277
+     ]
+    },
+    {
+     "start": 1290,
+     "end": 1292,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1301,
+     "end": 1304,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "fail-closed"
+       ],
+       "sentence": "Phase 4 (design D-2): reaching this point means `require_destructive_confirmation` above did not raise -- this operation is confirmed-destructive, the fail-clos"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "Phase 4 (design D-2): reaching this point means `require_destructive_confirmation` above did not raise -- this operation is confirmed-destructive, the fail-clos"
+     ],
+     "xref": [
+      "Phase 4 (design D-2): reaching this point means `require_destructive_confirmation` above did not raise -- this operation is confirmed-destructive, the fail-closed dispatch signal `transact` aggregates"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1315,
+     "end": 1315,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply",
+     "n_lines": 1,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1336,
+     "end": 1337,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_upsert",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1340,
+     "end": 1343,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_upsert",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1357,
+     "end": 1358,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_upsert",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "R-7, corrigendum M-9: type-check before searching for an existing row (symmetric with insert/update above)."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1364,
+     "end": 1365,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_upsert",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1381,
+     "end": 1389,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_upsert",
+     "n_lines": 9,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "This point is reached ONLY when `existing` (checked above) found no row AND there was no `expected_revision` -- i.e. this upsert is now KNOWN to resolve to an insert, so the insert-only absent-field r"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1403,
+     "end": 1407,
+     "kind": "comment",
+     "qualname": "ApplicationCell._fail_precondition",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1426,
+     "end": 1427,
+     "kind": "comment",
+     "qualname": "ApplicationCell._check_unique_conflict",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1461,
+     "end": 1465,
+     "kind": "docstring",
+     "qualname": "ApplicationCell.apply_schema",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "lock"
+       ],
+       "sentence": "Ruling U-7 (WP-6d): thin lock wrapper -- see `transact`'s identical wrapper above and `_idempotency_lock`'s own field comment."
+      }
+     ],
+     "protected": [],
+     "position": [
+      "Ruling U-7 (WP-6d): thin lock wrapper -- see `transact`'s identical wrapper above and `_idempotency_lock`'s own field comment."
+     ],
+     "xref": [
+      "Ruling U-7 (WP-6d): thin lock wrapper -- see `transact`'s identical wrapper above and `_idempotency_lock`'s own field comment.",
+      "All actual behavior lives in `_apply_schema_locked` below, unchanged."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1488,
+     "end": 1501,
+     "kind": "docstring",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 14,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 2,
+     "safety": [],
+     "protected": [
+      "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): identical single tx-exit-point discipline to `transact` above, adapted to this method's own pre-ex"
+     ],
+     "position": [
+      "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): identical single tx-exit-point discipline to `transact` above, adapted to this method's own pre-ex"
+     ],
+     "xref": [
+      "`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): identical single tx-exit-point discipline to `transact` above, adapted to this method's own pre-existing `before_*`-snapshot restore machi"
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      1492
+     ]
+    },
+    {
+     "start": 1505,
+     "end": 1514,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling I-3, WP-2c): the idempotency lookup sits HERE -- as early as possible after binding the request's own shape,"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling I-3, WP-2c): the idempotency lookup sits HERE -- as early as possible after binding the request's own shape,"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling I-3, WP-2c): the idempotency lookup sits HERE -- as early as possible after binding the request's own shape, before ANY operation-specific accountin"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1522,
+     "end": 1524,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "L-6/M-6: a record with no `request_id` (pre-1.7.0) is not a usable replay source -- treated as absent, checked before the digest comparison below."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1531,
+     "end": 1534,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1538,
+     "end": 1539,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1543,
+     "end": 1546,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "SI-08"
+       ],
+       "sentence": "WP-2 review M-2: indexes count toward `schema_objects` too, like entities/fields already did (SI-08: an index is a real resource, and every write against a uniq"
+      }
+     ],
+     "protected": [
+      "WP-2 review M-2: indexes count toward `schema_objects` too, like entities/fields already did (SI-08: an index is a real resource, and every write against a uniq"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1557,
+     "end": 1562,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-2 (7), U-1 = (β), WP-2a): `alter_field` redeclares an EXISTING field's constraints -- it creates no new entity/field/index, so it never change"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-2 (7), U-1 = (β), WP-2a): `alter_field` redeclares an EXISTING field's constraints -- it creates no new entity/field/index, so it never change"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-2 (7), U-1 = (β), WP-2a): `alter_field` redeclares an EXISTING field's constraints -- it creates no new entity/field/index, so it never changes `schema_objects` (that bound is unrela"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1573,
+     "end": 1580,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 2,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): computed against `before_revision` -- the revision \"as it stood when the request was decided\" (D-4 (7))"
+     ],
+     "position": [
+      "Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): computed against `before_revision` -- the revision \"as it stood when the request was decided\" (D-4 (7))"
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): computed against `before_revision` -- the revision \"as it stood when the request was decided\" (D-4 (7)), never a value the branch below could s"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1595,
+     "end": 1597,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1803,
+     "end": 1812,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "commit",
+        "rollback"
+       ],
+       "sentence": "Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit point -- plan validity, then commit vs rollback."
+      }
+     ],
+     "protected": [
+      "Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit point -- plan validity, then commit vs rollback."
+     ],
+     "position": [],
+     "xref": [
+      "Reached only once the operation branch above has already tentatively succeeded (a `require_destructive_confirmation` failure inside the `drop_entity`/`drop_index` branches above already raised, and is"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1820,
+     "end": 1827,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [
+      {
+       "markers": [
+        "no longer"
+       ],
+       "sentence": "D-4 (3)/(4): `descriptor` is the target entity's own descriptor as it would read afterwards -- `None` for a dry-run `drop_entity` (the entity no longer exists i"
+      }
+     ],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1848,
+     "end": 1852,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "commit",
+        "committed"
+       ],
+       "sentence": "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the same critical section as the commit just above, mirroring `transact`'s identical comment -- "
+      }
+     ],
+     "protected": [
+      "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the same critical section as the commit just above, mirroring `transact`'s identical comment -- "
+     ],
+     "position": [
+      "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the same critical section as the commit just above, mirroring `transact`'s identical comment -- "
+     ],
+     "xref": [
+      "Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in the same critical section as the commit just above, mirroring `transact`'s identical comment -- nothing below this point can raise, so a"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1856,
+     "end": 1858,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (D-7 (3), WP-2e): see `transact`'s identical comment -- `request_id` rides in the payload a future replay reads back."
+     ],
+     "position": [],
+     "xref": [
+      "Contract 1.7.0 (D-7 (3), WP-2e): see `transact`'s identical comment -- `request_id` rides in the payload a future replay reads back."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1862,
+     "end": 1866,
+     "kind": "comment",
+     "qualname": "ApplicationCell._apply_schema_locked",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Review round F-8: always `SchemaOutcome`, plan or no plan -- every pre-1.7.0 direct caller of this method (`test_constraints_declaration.py`'s many `cell.apply_"
+     ],
+     "position": [
+      "Review round F-8: always `SchemaOutcome`, plan or no plan -- every pre-1.7.0 direct caller of this method (`test_constraints_declaration.py`'s many `cell.apply_"
+     ],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    }
+   ],
+   "helper_blocks": [
+    {
+     "start": 114,
+     "end": 123,
+     "kind": "docstring",
+     "qualname": "enum_member_matches_type",
+     "n_lines": 10,
+     "history_id": null,
+     "helper": "enum_member_matches_type",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "`declared_type` outside `_ENUM_ELIGIBLE_TYPES` never reaches this function at all -- `validate_enum_declaration` below rejects the declaration itself first."
+     ]
+    },
+    {
+     "start": 136,
+     "end": 163,
+     "kind": "docstring",
+     "qualname": "validate_enum_declaration",
+     "n_lines": 28,
+     "history_id": null,
+     "helper": "validate_enum_declaration",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "Contract 1.7.0 (D-2 (2), contract text `field_constraints` description; monitor ruling B-1, rulings-wp2a-review.md): the single validator for an `enum` declaration, called from every one of the three places one can appear (`create_entity`'s `field_constraints`, `add_field`'s top-level `enum`, both here at bind time since the field's own declared type is already known then; and `alter_field`'s top-level `enum`, deferred to `apply_schema` -- see that method's own comment -- since only there is the field's EXISTING declared type known).",
+      "`declared_type` outside `_ENUM_ELIGIBLE_TYPES` above (`None`/untyped, `\"object\"`, `\"array\"` -- `\"json\"` is never a value this module's own internal vocabulary uses, see `FIELD_TYPES`'s own comment) is rejected OUTRIGHT (ruling B-1: no first-member type INFERENCE for an untyped field, unlike the pre-rework implementation -- MitateDB rejects the identical `declared_type` set the identical way, `field_types._ENUM_ELIGIBLE_TYPES`/`validate_enum_declaration`, so a `field_constraints`/`enum`/`field_types: json` combination the catalog can report is now refused by BOTH peers, never accepted by one and refused by the other).",
+      "Raises `_ConstraintDeclarationError` (never `fail()` directly -- see that class' own docstring) for: `declared_type` outside the 4 eligible words, not a non-empty list, a `None` member, a member whose JSON type does not match `declared_type`, or a duplicate member."
+     ]
+    },
+    {
+     "start": 589,
+     "end": 604,
+     "kind": "docstring",
+     "qualname": "normalize_request_for_plan",
+     "n_lines": 16,
+     "history_id": null,
+     "helper": "normalize_request_for_plan",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 610,
+     "end": 631,
+     "kind": "docstring",
+     "qualname": "compute_plan_token",
+     "n_lines": 22,
+     "history_id": null,
+     "helper": "compute_plan_token",
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "xref_to_outside": []
+    },
+    {
+     "start": 647,
+     "end": 661,
+     "kind": "docstring",
+     "qualname": "normalize_request_for_idempotency",
+     "n_lines": 15,
+     "history_id": null,
+     "helper": "normalize_request_for_idempotency",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "Contract 1.7.0 (D-5 (1)(i), addendum 2 S-a, ruling I-2): the canonical byte encoding an `idempotency_key`'s own digest commits to -- IDENTICAL recipe to `normalize_request_for_plan` above (same key ordering / separator / `ensure_ascii=False` / UTF-8 rules), but a DIFFERENT exclusion set: `plan`, `dry_run` AND `idempotency_key` itself (three keys, not two) -- ruling I-2/I-13: `idempotency_key` is excluded from ITS OWN digest (a resend is identified by the key, not re-hashed into what it must match) but stays IN `normalize_request_for_plan`'s digest, so a `plan` token captured with one `idempotency_key` (or none) does not verify against a request presenting a different one.",
+      "Deliberately not sharing a body with `normalize_request_for_plan` (work order §2 WP-2c: \"本文を共有せず、除外key の違いだけの同型に保つ\") -- the two are pinned isomorphic by name/signature/behaviour only, per the peer-symmetry convention above."
+     ]
+    },
+    {
+     "start": 695,
+     "end": 702,
+     "kind": "docstring",
+     "qualname": "idempotency_digest",
+     "n_lines": 8,
+     "history_id": null,
+     "helper": "idempotency_digest",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    }
+   ],
+   "helpers_without_node": [],
+   "history_tokens_file": 112,
+   "date_lines_file": [
+    310,
+    584,
+    641
+   ],
+   "colon_hash_lines": [],
+   "history_tokens_in_targets": 94,
+   "summary": {
+    "target_blocks": 103,
+    "target_docstring": 11,
+    "target_comment": 92,
+    "target_lines": 653,
+    "blocks_with_tokens": 60,
+    "lines_in_blocks_with_tokens": 457,
+    "date_lines_in_targets": [
+     310,
+     584,
+     641
+    ],
+    "marker_sentences": 17,
+    "marker_blocks": 17,
+    "xref_sentences": 63,
+    "safety_sentences": 17,
+    "protected_sentences": 37,
+    "position_sentences": 34,
+    "safety_blocks": 17,
+    "ten_plus_blocks": [
+     [
+      81,
+      110
+     ],
+     [
+      202,
+      212
+     ],
+     [
+      309,
+      319
+     ],
+     [
+      359,
+      375
+     ],
+     [
+      470,
+      484
+     ],
+     [
+      667,
+      681
+     ],
+     [
+      708,
+      719
+     ],
+     [
+      728,
+      742
+     ],
+     [
+      768,
+      777
+     ],
+     [
+      788,
+      798
+     ],
+     [
+      906,
+      915
+     ],
+     [
+      1039,
+      1069
+     ],
+     [
+      1183,
+      1192
+     ],
+     [
+      1195,
+      1205
+     ],
+     [
+      1277,
+      1286
+     ],
+     [
+      1488,
+      1501
+     ],
+     [
+      1505,
+      1514
+     ],
+     [
+      1803,
+      1812
+     ]
+    ],
+    "ten_plus_lines": 253,
+    "ten_plus_all_blocks": 23,
+    "scratchpad_target_lines": [
+     359,
+     728,
+     788,
+     906,
+     1048,
+     1063,
+     1277,
+     1492
+    ],
+    "scratchpad_helper_blocks": [
+     [
+      610,
+      631,
+      [
+       "{scratchpad}/"
+      ]
+     ]
+    ]
+   }
+  },
+  "MitateDB-api/src/mitatedb_api/platform_declarations.py": {
+   "lines": 1713,
+   "blocks_total": 67,
+   "blocks_docstring": 38,
+   "blocks_comment": 29,
+   "helpers": {
+    "PlatformDeclarationError": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "reject_removed_timeout_env": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "reject_removed_surface_env": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "Surfaces": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "PlatformDeclarations": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "validate_surfaces_value": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "validate_coalescing_window_value": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "validate_audit_writer_roles_value": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "read_platform_declarations": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "RoleTimeoutCatalog": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "read_declared_role_timeouts": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "derive_visibility_lag_ms": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "read_effective_timeouts_ms": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_writer_role_timeouts": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_control_surface_consistency": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "require_control_surface_declared": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f21_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f21_acl_holders": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_denial_window_function": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f1_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f2_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f3_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f3c_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f4_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f4b_window_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f4b_writer_roles_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f5_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f6_forward_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f6_reverse_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f7_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f8_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f9_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f10_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f11_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f13_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_contract_170_declarations": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "ops_module_hint": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "ProcessCeilings": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "validate_process_ceilings_value": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f15_shape_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f15_value_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_table_owner": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_roles_with_table_privilege": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_ROLE_CLASSES": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_API_ROLE_STORE_COUNT": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_CONTROLPLANE_ROLE_POOL_FLOOR": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_AUDITREADER_ROLE_POOL_FLOOR": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f16_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f17_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_auditreader_statement_timeout": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "headroom_lower_bound": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_max_connections_headroom": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f18_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_count_registered_applications": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_read_connection_headroom_settings": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "HeadroomReport": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "_f19_message": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_application_collations": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ],
+    "check_request_rate_function": [
+     "MitateDB-api/tests/test_audit_query.py",
+     "r2db-api/tests/test_audit_query.py"
+    ]
+   },
+   "helper_nodes": [
+    {
+     "symbol": "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+     "node": "Assign",
+     "lines": [
+      130,
+      130
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "PlatformDeclarationError",
+     "node": "ClassDef",
+     "lines": [
+      140,
+      156
+     ],
+     "blocks_inside": [
+      [
+       141,
+       152,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "Surfaces",
+     "node": "ClassDef",
+     "lines": [
+      159,
+      163
+     ],
+     "blocks_inside": [
+      [
+       161,
+       161,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "ProcessCeilings",
+     "node": "ClassDef",
+     "lines": [
+      166,
+      176
+     ],
+     "blocks_inside": [
+      [
+       168,
+       174,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "PlatformDeclarations",
+     "node": "ClassDef",
+     "lines": [
+      179,
+      186
+     ],
+     "blocks_inside": [
+      [
+       181,
+       182,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "RoleTimeoutCatalog",
+     "node": "ClassDef",
+     "lines": [
+      189,
+      196
+     ],
+     "blocks_inside": [
+      [
+       191,
+       193,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f1_message",
+     "node": "FunctionDef",
+     "lines": [
+      205,
+      214
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f2_message",
+     "node": "FunctionDef",
+     "lines": [
+      217,
+      224
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "reject_removed_timeout_env",
+     "node": "FunctionDef",
+     "lines": [
+      227,
+      235
+     ],
+     "blocks_inside": [
+      [
+       228,
+       232,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "reject_removed_surface_env",
+     "node": "FunctionDef",
+     "lines": [
+      238,
+      246
+     ],
+     "blocks_inside": [
+      [
+       239,
+       243,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f3_message",
+     "node": "FunctionDef",
+     "lines": [
+      257,
+      262
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f3c_message",
+     "node": "FunctionDef",
+     "lines": [
+      265,
+      277
+     ],
+     "blocks_inside": [
+      [
+       266,
+       271,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f4_message",
+     "node": "FunctionDef",
+     "lines": [
+      280,
+      285
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f4b_window_message",
+     "node": "FunctionDef",
+     "lines": [
+      288,
+      295
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f4b_writer_roles_message",
+     "node": "FunctionDef",
+     "lines": [
+      298,
+      305
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f5_message",
+     "node": "FunctionDef",
+     "lines": [
+      308,
+      313
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f8_message",
+     "node": "FunctionDef",
+     "lines": [
+      316,
+      321
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "validate_coalescing_window_value",
+     "node": "FunctionDef",
+     "lines": [
+      324,
+      330
+     ],
+     "blocks_inside": [
+      [
+       325,
+       327,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "validate_audit_writer_roles_value",
+     "node": "FunctionDef",
+     "lines": [
+      333,
+      357
+     ],
+     "blocks_inside": [
+      [
+       334,
+       347,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "validate_surfaces_value",
+     "node": "FunctionDef",
+     "lines": [
+      392,
+      407
+     ],
+     "blocks_inside": [
+      [
+       393,
+       395,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f15_shape_message",
+     "node": "FunctionDef",
+     "lines": [
+      419,
+      427
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f15_value_message",
+     "node": "FunctionDef",
+     "lines": [
+      430,
+      437
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "validate_process_ceilings_value",
+     "node": "FunctionDef",
+     "lines": [
+      440,
+      471
+     ],
+     "blocks_inside": [
+      [
+       441,
+       460,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "read_platform_declarations",
+     "node": "FunctionDef",
+     "lines": [
+      474,
+      522
+     ],
+     "blocks_inside": [
+      [
+       475,
+       487,
+       "docstring"
+      ],
+      [
+       503,
+       509,
+       "comment"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f6_forward_message",
+     "node": "FunctionDef",
+     "lines": [
+      533,
+      542
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f6_reverse_message",
+     "node": "FunctionDef",
+     "lines": [
+      545,
+      553
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "check_control_surface_consistency",
+     "node": "FunctionDef",
+     "lines": [
+      556,
+      566
+     ],
+     "blocks_inside": [
+      [
+       557,
+       561,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "require_control_surface_declared",
+     "node": "FunctionDef",
+     "lines": [
+      569,
+      576
+     ],
+     "blocks_inside": [
+      [
+       570,
+       574,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f7_message",
+     "node": "FunctionDef",
+     "lines": [
+      589,
+      597
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f9_message",
+     "node": "FunctionDef",
+     "lines": [
+      600,
+      610
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f10_message",
+     "node": "FunctionDef",
+     "lines": [
+      613,
+      620
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f11_message",
+     "node": "FunctionDef",
+     "lines": [
+      623,
+      630
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f13_message",
+     "node": "FunctionDef",
+     "lines": [
+      633,
+      646
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "read_declared_role_timeouts",
+     "node": "FunctionDef",
+     "lines": [
+      674,
+      705
+     ],
+     "blocks_inside": [
+      [
+       675,
+       681,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "read_effective_timeouts_ms",
+     "node": "FunctionDef",
+     "lines": [
+      708,
+      716
+     ],
+     "blocks_inside": [
+      [
+       709,
+       712,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "derive_visibility_lag_ms",
+     "node": "FunctionDef",
+     "lines": [
+      719,
+      726
+     ],
+     "blocks_inside": [
+      [
+       720,
+       725,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "check_writer_role_timeouts",
+     "node": "FunctionDef",
+     "lines": [
+      729,
+      755
+     ],
+     "blocks_inside": [
+      [
+       732,
+       745,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "check_contract_170_declarations",
+     "node": "FunctionDef",
+     "lines": [
+      798,
+      853
+     ],
+     "blocks_inside": [
+      [
+       803,
+       823,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_API_ROLE_STORE_COUNT",
+     "node": "Assign",
+     "lines": [
+      929,
+      929
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_CONTROLPLANE_ROLE_POOL_FLOOR",
+     "node": "Assign",
+     "lines": [
+      939,
+      939
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_AUDITREADER_ROLE_POOL_FLOOR",
+     "node": "Assign",
+     "lines": [
+      946,
+      946
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_roles_with_table_privilege",
+     "node": "FunctionDef",
+     "lines": [
+      949,
+      960
+     ],
+     "blocks_inside": [
+      [
+       950,
+       953,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_table_owner",
+     "node": "FunctionDef",
+     "lines": [
+      963,
+      984
+     ],
+     "blocks_inside": [
+      [
+       964,
+       980,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f16_message",
+     "node": "FunctionDef",
+     "lines": [
+      987,
+      995
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_ROLE_CLASSES",
+     "node": "Assign",
+     "lines": [
+      1002,
+      1002
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f17_message",
+     "node": "FunctionDef",
+     "lines": [
+      1129,
+      1142
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "check_auditreader_statement_timeout",
+     "node": "FunctionDef",
+     "lines": [
+      1145,
+      1198
+     ],
+     "blocks_inside": [
+      [
+       1146,
+       1171,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "headroom_lower_bound",
+     "node": "FunctionDef",
+     "lines": [
+      1239,
+      1264
+     ],
+     "blocks_inside": [
+      [
+       1248,
+       1262,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_count_registered_applications",
+     "node": "FunctionDef",
+     "lines": [
+      1267,
+      1277
+     ],
+     "blocks_inside": [
+      [
+       1268,
+       1273,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_read_connection_headroom_settings",
+     "node": "FunctionDef",
+     "lines": [
+      1283,
+      1309
+     ],
+     "blocks_inside": [
+      [
+       1284,
+       1291,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "HeadroomReport",
+     "node": "ClassDef",
+     "lines": [
+      1312,
+      1322
+     ],
+     "blocks_inside": [
+      [
+       1314,
+       1317,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f18_message",
+     "node": "FunctionDef",
+     "lines": [
+      1325,
+      1345
+     ],
+     "blocks_inside": [
+      [
+       1334,
+       1338,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "check_max_connections_headroom",
+     "node": "FunctionDef",
+     "lines": [
+      1348,
+      1406
+     ],
+     "blocks_inside": [
+      [
+       1352,
+       1369,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f19_message",
+     "node": "FunctionDef",
+     "lines": [
+      1409,
+      1434
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "check_application_collations",
+     "node": "FunctionDef",
+     "lines": [
+      1437,
+      1490
+     ],
+     "blocks_inside": [
+      [
+       1438,
+       1461,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "check_request_rate_function",
+     "node": "FunctionDef",
+     "lines": [
+      1493,
+      1522
+     ],
+     "blocks_inside": [
+      [
+       1494,
+       1503,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "_f21_message",
+     "node": "FunctionDef",
+     "lines": [
+      1536,
+      1542
+     ],
+     "blocks_inside": []
+    },
+    {
+     "symbol": "_f21_acl_holders",
+     "node": "FunctionDef",
+     "lines": [
+      1545,
+      1559
+     ],
+     "blocks_inside": [
+      [
+       1546,
+       1550,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "check_denial_window_function",
+     "node": "FunctionDef",
+     "lines": [
+      1562,
+      1662
+     ],
+     "blocks_inside": [
+      [
+       1563,
+       1584,
+       "docstring"
+      ]
+     ]
+    },
+    {
+     "symbol": "ops_module_hint",
+     "node": "FunctionDef",
+     "lines": [
+      1665,
+      1671
+     ],
+     "blocks_inside": [
+      [
+       1666,
+       1670,
+       "docstring"
+      ]
+     ]
+    }
+   ],
+   "existing_ch": [
+    {
+     "start": 1011,
+     "end": 1064,
+     "kind": "docstring",
+     "qualname": "check_role_connection_limits",
+     "n_lines": 54,
+     "history_id": "CH-0550"
+    }
+   ],
+   "target_blocks": [
+    {
+     "start": 1,
+     "end": 47,
+     "kind": "docstring",
+     "qualname": "<module>",
+     "n_lines": 47,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [
+      23,
+      44
+     ],
+     "n_sentences": 7,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Reference-implementation module (supervisor ruling 2026-09-05, `{scratchpad}/rulings-q4-wp12-rework.md` §1): every name, signature and return type below is shar"
+      },
+      {
+       "markers": [
+        "this (WP|commit|change set|round)"
+       ],
+       "sentence": "This is a deliberate, documented implementation choice (not specified verbatim by the ruling, which only fixes the signatures of the read/validate/derive/check "
+      },
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "Peer-local, independently maintained (no cross-peer sharing, requester ruling 2026-09-03) -- this module's read/validate/derive/check helpers are pinned isomorp"
+      }
+     ],
+     "token_sentences": 2,
+     "safety": [],
+     "protected": [
+      "Peer-local, independently maintained (no cross-peer sharing, requester ruling 2026-09-03) -- this module's read/validate/derive/check helpers are pinned isomorp"
+     ],
+     "position": [
+      "Reference-implementation module (supervisor ruling 2026-09-05, `{scratchpad}/rulings-q4-wp12-rework.md` §1): every name, signature and return type below is shar"
+     ],
+     "xref": [
+      "Reference-implementation module (supervisor ruling 2026-09-05, `{scratchpad}/rulings-q4-wp12-rework.md` §1): every name, signature and return type below is shared verbatim with r2db-api's own same-nam",
+      "A handful of message-building helpers below (`_f1_message`/`_f2_message`/`_f8_message`/`_f13_message`'s own `schema` mention) instead reach for this MODULE's own peer-local constants (`PEER_MODULE`, `"
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      24
+     ]
+    },
+    {
+     "start": 60,
+     "end": 65,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Composition roots pass their OWN resolved schema (possibly a throwaway-prefixed test schema) explicitly to every function below; this constant is consulted only by the small set of message-building he"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 69,
+     "end": 73,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [
+      72
+     ],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "The platform single-shot migration that creates the table and seeds the two writer roles' timeout role-settings AND the `audit_writer_roles` row (design §8 migr"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "role",
+        "timeout"
+       ],
+       "sentence": "The platform single-shot migration that creates the table and seeds the two writer roles' timeout role-settings AND the `audit_writer_roles` row (design §8 migr"
+      }
+     ],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 77,
+     "end": 82,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Phase 10 WP-6b (design D-5 (ii)): the platform single-shot migration that widens `platform_declarations.key`'s own CHECK constraint to accept `'process_ceilings"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 86,
+     "end": 88,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 3,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 91,
+     "end": 94,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 97,
+     "end": 98,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 101,
+     "end": 104,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 108,
+     "end": 114,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [
+      {
+       "markers": [
+        "previously"
+       ],
+       "sentence": "F-6's own env var name -- referenced by bare name from `_f6_forward_message`/`_f6_reverse_message` only (Agent C isomorphism convergence, rulings-q4-wp12-rework"
+      }
+     ],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 121,
+     "end": 125,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 128,
+     "end": 129,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 2,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 132,
+     "end": 136,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 199,
+     "end": 202,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 249,
+     "end": 254,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 3,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "Both write (`ops declare-*`) and read paths call the SAME `validate_*` functions below (design D-2(d): \"検証は書き込み時と読み出し時の両方で行い、両方が同じ Python の検証関数を通る\")."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 361,
+     "end": 370,
+     "kind": "docstring",
+     "qualname": "_validate_base_url",
+     "n_lines": 10,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 379,
+     "end": 384,
+     "kind": "comment",
+     "qualname": "_validate_base_url",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 525,
+     "end": 530,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 6,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [
+      529
+     ],
+     "n_sentences": 2,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "--------------------------------------------------------------------------- F-6 / F-3c: `surfaces.control`'s presence must agree with the calling process' own r"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "role"
+       ],
+       "sentence": "--------------------------------------------------------------------------- F-6 / F-3c: `surfaces.control`'s presence must agree with the calling process' own r"
+      }
+     ],
+     "protected": [
+      "--------------------------------------------------------------------------- F-6 / F-3c: `surfaces.control`'s presence must agree with the calling process' own r"
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 579,
+     "end": 586,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 4,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 656,
+     "end": 663,
+     "kind": "docstring",
+     "qualname": "_role_setting_rows",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [
+      661
+     ],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Every `pg_db_role_setting` row for `role_name` that is either database-independent (`setdatabase = 0`, the declaration itself, design §1.5 finding 6) or scoped "
+     ],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 758,
+     "end": 797,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 40,
+     "history_id": null,
+     "history_tokens": 2,
+     "date_lines": [],
+     "n_sentences": 5,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [
+      "Contract 1.7.0 (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1/D-6/D-5, work order §2 WP-3e F-3, `{scratchpad}/rulings-r3-r7-flip"
+     ],
+     "position": [],
+     "xref": [
+      "Never a second, redundant construction of a fresh `FoundationConfig()`/capabilities document for itself (the SAME flaw r2db-api's own pre-rework version had, audit finding D-2/L-2 -- a broken default ",
+      "(b) the SAME served document's own `limits` block (never a separately constructed `FoundationConfig`/`ResourceLimits`) carries a positive `enum_members`/`idempotency_entries`/`idempotency_retention_ms"
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/",
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      760,
+      761
+     ]
+    },
+    {
+     "start": 856,
+     "end": 859,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 862,
+     "end": 883,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 22,
+     "history_id": null,
+     "history_tokens": 1,
+     "date_lines": [],
+     "n_sentences": 4,
+     "marker_sentences": [
+      {
+       "markers": [
+        "used to"
+       ],
+       "sentence": "WP-3e rework T3 (ruling `{scratchpad}/rulings-r3-r7-flip.md` L-2/M-7) removed this module's former `_CONTRACT_170_LIMIT_ATTRIBUTES` (a `contract name -> Foundat"
+      }
+     ],
+     "token_sentences": 1,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "A future limit class whose contract name and this peer's own `FoundationConfig` field name genuinely diverge (unlike the three above) would need a mapping constant again -- if so, keep it OUTSIDE this"
+     ],
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "scratchpad_lines": [
+      871
+     ]
+    },
+    {
+     "start": 887,
+     "end": 920,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 34,
+     "history_id": null,
+     "history_tokens": 8,
+     "date_lines": [
+      888,
+      917
+     ],
+     "n_sentences": 6,
+     "marker_sentences": [
+      {
+       "markers": [
+        "(supervisor|supervisory|monitor|requester) ruling"
+       ],
+       "sentence": "--------------------------------------------------------------------------- F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09; peer-symmetric with r2db-api's o"
+      }
+     ],
+     "token_sentences": 2,
+     "safety": [
+      {
+       "words": [
+        "role"
+       ],
+       "sentence": "--------------------------------------------------------------------------- F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09; peer-symmetric with r2db-api's o"
+      },
+      {
+       "words": [
+        "role"
+       ],
+       "sentence": "This is an EXPLICIT exclusion (`_table_owner`, below), not merely \"no grants match its identity\" -- `mitatedbsvc_provision` is the role every migration in this "
+      }
+     ],
+     "protected": [
+      "--------------------------------------------------------------------------- F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09; peer-symmetric with r2db-api's o"
+     ],
+     "position": [
+      "This is an EXPLICIT exclusion (`_table_owner`, below), not merely \"no grants match its identity\" -- `mitatedbsvc_provision` is the role every migration in this "
+     ],
+     "xref": [
+      "This is an EXPLICIT exclusion (`_table_owner`, below), not merely \"no grants match its identity\" -- `mitatedbsvc_provision` is the role every migration in this set runs `CREATE TABLE application_audit"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 922,
+     "end": 928,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 931,
+     "end": 938,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 8,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 941,
+     "end": 945,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 5,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 998,
+     "end": 1001,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "The three platform-plane role classes `check_role_connection_limits` knows how to identify -- a caller narrowing `role_classes` below passes any subset of this set."
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1068,
+     "end": 1074,
+     "kind": "comment",
+     "qualname": "check_role_connection_limits",
+     "n_lines": 7,
+     "history_id": null,
+     "history_tokens": 3,
+     "date_lines": [
+      1068
+     ],
+     "n_sentences": 2,
+     "marker_sentences": [],
+     "token_sentences": 1,
+     "safety": [
+      {
+       "words": [
+        "role"
+       ],
+       "sentence": "M-1 (WP-4 integration review 2026-09-10): a role can legitimately match MORE than one platform-plane class below -- `max(...)` keeps the STRICTEST floor that ro"
+      }
+     ],
+     "protected": [],
+     "position": [
+      "M-1 (WP-4 integration review 2026-09-10): a role can legitimately match MORE than one platform-plane class below -- `max(...)` keeps the STRICTEST floor that ro"
+     ],
+     "xref": [
+      "M-1 (WP-4 integration review 2026-09-10): a role can legitimately match MORE than one platform-plane class below -- `max(...)` keeps the STRICTEST floor that role is actually subject to instead of whi",
+      "`_table_owner` exclusion keeps the table-owning operator role (`mitatedbsvc_provision`, never a real pooled role -- see the module header above) from being misidentified as matching all three via its "
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1095,
+     "end": 1098,
+     "kind": "comment",
+     "qualname": "check_role_connection_limits",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1201,
+     "end": 1236,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 36,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 5,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [
+      "--------------------------------------------------------------------------- F-18 (R-91, work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_HEADROOM_CHECK_V1.md §1.2 D-1, peer-symmetric with r2"
+     ],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    },
+    {
+     "start": 1525,
+     "end": 1528,
+     "kind": "comment",
+     "qualname": "<module>",
+     "n_lines": 4,
+     "history_id": null,
+     "history_tokens": 0,
+     "date_lines": [],
+     "n_sentences": 1,
+     "marker_sentences": [],
+     "token_sentences": 0,
+     "safety": [],
+     "protected": [],
+     "position": [],
+     "xref": [],
+     "scratchpad_refs": [],
+     "scratchpad_lines": []
+    }
+   ],
+   "helper_blocks": [
+    {
+     "start": 141,
+     "end": 152,
+     "kind": "docstring",
+     "qualname": "PlatformDeclarationError",
+     "n_lines": 12,
+     "history_id": null,
+     "helper": "PlatformDeclarationError",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "The message text itself is UNCHANGED by this addition (every `_fN_message`/`_fNx_message` builder above is untouched; only the `raise PlatformDeclarationError(...)` call sites below now also pass `code=`)."
+     ]
+    },
+    {
+     "start": 161,
+     "end": 161,
+     "kind": "docstring",
+     "qualname": "Surfaces",
+     "n_lines": 1,
+     "history_id": null,
+     "helper": "Surfaces",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 168,
+     "end": 174,
+     "kind": "docstring",
+     "qualname": "ProcessCeilings",
+     "n_lines": 7,
+     "history_id": null,
+     "helper": "ProcessCeilings",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 181,
+     "end": 182,
+     "kind": "docstring",
+     "qualname": "PlatformDeclarations",
+     "n_lines": 2,
+     "history_id": null,
+     "helper": "PlatformDeclarations",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 191,
+     "end": 193,
+     "kind": "docstring",
+     "qualname": "RoleTimeoutCatalog",
+     "n_lines": 3,
+     "history_id": null,
+     "helper": "RoleTimeoutCatalog",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 228,
+     "end": 232,
+     "kind": "docstring",
+     "qualname": "reject_removed_timeout_env",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "reject_removed_timeout_env",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 239,
+     "end": 243,
+     "kind": "docstring",
+     "qualname": "reject_removed_surface_env",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "reject_removed_surface_env",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 266,
+     "end": 271,
+     "kind": "docstring",
+     "qualname": "_f3c_message",
+     "n_lines": 6,
+     "history_id": null,
+     "helper": "_f3c_message",
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "xref_to_outside": []
+    },
+    {
+     "start": 325,
+     "end": 327,
+     "kind": "docstring",
+     "qualname": "validate_coalescing_window_value",
+     "n_lines": 3,
+     "history_id": null,
+     "helper": "validate_coalescing_window_value",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 334,
+     "end": 347,
+     "kind": "docstring",
+     "qualname": "validate_audit_writer_roles_value",
+     "n_lines": 14,
+     "history_id": null,
+     "helper": "validate_audit_writer_roles_value",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 393,
+     "end": 395,
+     "kind": "docstring",
+     "qualname": "validate_surfaces_value",
+     "n_lines": 3,
+     "history_id": null,
+     "helper": "validate_surfaces_value",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 441,
+     "end": 460,
+     "kind": "docstring",
+     "qualname": "validate_process_ceilings_value",
+     "n_lines": 20,
+     "history_id": null,
+     "helper": "validate_process_ceilings_value",
+     "scratchpad_refs": [
+      "scratchpad/"
+     ],
+     "xref_to_outside": [
+      "Two SEPARATE checks, deliberately not folded into one `all(...)` (peer-parity note, supervisor ruling `scratchpad/phase10/wp6-rulings.md` #4: r2db's 2-stage form -- shape, then value -- is the form both peers converge to): stage 1 rejects the wrong CONTAINER shape (not a dict, or the wrong key set) with `_f15_shape_message`; stage 2, reached only once stage 1 has already confirmed both keys are present, rejects a present-but-out-of-range VALUE (wrong type, `bool`, non-positive) with the separate `_f15_value_message` -- a distinct message per failure kind, even though both stages raise the SAME `code=\"F-15\"` (design D-5(ii): existence and shape are one combined check, not two exit codes; see this function's own callers in `read_platform_declarations` below)."
+     ]
+    },
+    {
+     "start": 475,
+     "end": 487,
+     "kind": "docstring",
+     "qualname": "read_platform_declarations",
+     "n_lines": 13,
+     "history_id": null,
+     "helper": "read_platform_declarations",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 503,
+     "end": 509,
+     "kind": "comment",
+     "qualname": "read_platform_declarations",
+     "n_lines": 7,
+     "history_id": null,
+     "helper": "read_platform_declarations",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "Existence and shape are both raised as F-15 (design D-5(ii): one combined check, unlike surfaces' F-3/F-5 split) -- validated here, in one contiguous step right after the existence check above and BEFORE surfaces'/the window's own value validation below, so `ops verify-declarations`' own fixed read order (`_VERIFY_DECLARATIONS_READ_ORDER`) never has to represent this row's two sub-checks at two different list positions."
+     ]
+    },
+    {
+     "start": 557,
+     "end": 561,
+     "kind": "docstring",
+     "qualname": "check_control_surface_consistency",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "check_control_surface_consistency",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "**data-plane only** -- the control-plane process never calls this (it has its own unconditional F-3c check below, monitor ruling 2026-09-05: \"control プロセスの surfaces.control 欠落は F-3 とは別の状況...control_composition の F-6 出力は撤去し、F-3c を出す\")."
+     ]
+    },
+    {
+     "start": 570,
+     "end": 574,
+     "kind": "docstring",
+     "qualname": "require_control_surface_declared",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "require_control_surface_declared",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 675,
+     "end": 681,
+     "kind": "docstring",
+     "qualname": "read_declared_role_timeouts",
+     "n_lines": 7,
+     "history_id": null,
+     "helper": "read_declared_role_timeouts",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 709,
+     "end": 712,
+     "kind": "docstring",
+     "qualname": "read_effective_timeouts_ms",
+     "n_lines": 4,
+     "history_id": null,
+     "helper": "read_effective_timeouts_ms",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 720,
+     "end": 725,
+     "kind": "docstring",
+     "qualname": "derive_visibility_lag_ms",
+     "n_lines": 6,
+     "history_id": null,
+     "helper": "derive_visibility_lag_ms",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 732,
+     "end": 745,
+     "kind": "docstring",
+     "qualname": "check_writer_role_timeouts",
+     "n_lines": 14,
+     "history_id": null,
+     "helper": "check_writer_role_timeouts",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "Order (design §3.7 step 6): (1) self-role inclusion in `declared_roles` (F-13, checked BEFORE the dual check below -- a role that is not even declared has no `visibility_lag_ms` to describe); (2) catalog declaration (F-7/F-10/F-11, `read_declared_role_timeouts`); (3) this SAME connection's own effective `pg_settings` value, compared as ms integers, never as rendered strings (F-9)."
+     ]
+    },
+    {
+     "start": 803,
+     "end": 823,
+     "kind": "docstring",
+     "qualname": "check_contract_170_declarations",
+     "n_lines": 21,
+     "history_id": null,
+     "helper": "check_contract_170_declarations",
+     "scratchpad_refs": [
+      "{scratchpad}/"
+     ],
+     "xref_to_outside": [
+      "O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md` 追補4): the signature above is bare (not string-quoted) annotations, matching r2db-api's own same-named function's real, current form -- both modules carry `from __future__import annotations`, so quoting was never semantically necessary; a prior draft quoted these three for reasons unrelated to runtime behavior, which only produced a normalize-diff against the sibling (r2db 形を基準にし, O-7's own instruction)."
+     ]
+    },
+    {
+     "start": 950,
+     "end": 953,
+     "kind": "docstring",
+     "qualname": "_roles_with_table_privilege",
+     "n_lines": 4,
+     "history_id": null,
+     "helper": "_roles_with_table_privilege",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 964,
+     "end": 980,
+     "kind": "docstring",
+     "qualname": "_table_owner",
+     "n_lines": 17,
+     "history_id": null,
+     "helper": "_table_owner",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "The role that owns `<schema>.<table>` (`pg_tables.tableowner`) -- that role implicitly holds every privilege on the table (INSERT, SELECT, ...) without ever appearing as a `grantee` row for a real GRANT, which is exactly the shape `_roles_with_table_privilege` above reads.",
+      "Used below to keep that owner (the migration-running operator role, e.g. `mitatedbsvc_provision`) from being misidentified as matching every platform-plane role class at once (M-1, WP-4 integration review 2026-09-10, peer-symmetric with r2db-api's own `_table_owner`).",
+      "Returns `None` if the table does not exist (a caller scoped to `role_classes={\"api\"}` or similar, e.g. `mitatedb_api.main`'s own startup F-16 call, may run before `0005_application_audit.sql` is guaranteed applied against the connection it happens to be given) -- exactly like `_roles_with_table_privilege` above, which already tolerates a missing table by simply returning no rows.",
+      "`None` never equals a real role name, so the exclusion checks below simply never match in that case, the same as if this function were never called at all."
+     ]
+    },
+    {
+     "start": 1146,
+     "end": 1171,
+     "kind": "docstring",
+     "qualname": "check_auditreader_statement_timeout",
+     "n_lines": 26,
+     "history_id": null,
+     "helper": "check_auditreader_statement_timeout",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "F-17: raises `PlatformDeclarationError(code=\"F-17\")` for the FIRST audit-reader role, in sorted name order, that fails either condition below."
+     ]
+    },
+    {
+     "start": 1248,
+     "end": 1262,
+     "kind": "docstring",
+     "qualname": "headroom_lower_bound",
+     "n_lines": 15,
+     "history_id": null,
+     "helper": "headroom_lower_bound",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1268,
+     "end": 1273,
+     "kind": "docstring",
+     "qualname": "_count_registered_applications",
+     "n_lines": 6,
+     "history_id": null,
+     "helper": "_count_registered_applications",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "The number of rows in `<schema>.applications` -- read unconditionally (never filtered by `runtime_role`/`developer_role` being set, unlike `check_role_connection_limits`'s own read of this table): a REGISTERED-only row (no roles provisioned yet) still means \"this platform has at least one application\", which is all `headroom_lower_bound` above needs to know."
+     ]
+    },
+    {
+     "start": 1284,
+     "end": 1291,
+     "kind": "docstring",
+     "qualname": "_read_connection_headroom_settings",
+     "n_lines": 8,
+     "history_id": null,
+     "helper": "_read_connection_headroom_settings",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1314,
+     "end": 1317,
+     "kind": "docstring",
+     "qualname": "HeadroomReport",
+     "n_lines": 4,
+     "history_id": null,
+     "helper": "HeadroomReport",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "`check_max_connections_headroom`'s own return shape (success only -- a FAILING judgment raises instead, `_f18_message` below): the numbers `ops verify-declarations`'s own OK line reports (completion condition 4)."
+     ]
+    },
+    {
+     "start": 1334,
+     "end": 1338,
+     "kind": "docstring",
+     "qualname": "_f18_message",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "_f18_message",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1352,
+     "end": 1369,
+     "kind": "docstring",
+     "qualname": "check_max_connections_headroom",
+     "n_lines": 18,
+     "history_id": null,
+     "helper": "check_max_connections_headroom",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "F-18: raises `PlatformDeclarationError(code=\"F-18\")` when the LOWER bound of the connections `process_ceilings` guarantees this deployment opens (`headroom_lower_bound`, above) plus `superuser_reserved_connections` plus `reserved_connections` exceeds `max_connections` (all three read live off `pg_settings`, never a caller-supplied value)."
+     ]
+    },
+    {
+     "start": 1438,
+     "end": 1461,
+     "kind": "docstring",
+     "qualname": "check_application_collations",
+     "n_lines": 24,
+     "history_id": null,
+     "helper": "check_application_collations",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1494,
+     "end": 1503,
+     "kind": "docstring",
+     "qualname": "check_request_rate_function",
+     "n_lines": 10,
+     "history_id": null,
+     "helper": "check_request_rate_function",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1546,
+     "end": 1550,
+     "kind": "docstring",
+     "qualname": "_f21_acl_holders",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "_f21_acl_holders",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1563,
+     "end": 1584,
+     "kind": "docstring",
+     "qualname": "check_denial_window_function",
+     "n_lines": 22,
+     "history_id": null,
+     "helper": "check_denial_window_function",
+     "scratchpad_refs": [],
+     "xref_to_outside": []
+    },
+    {
+     "start": 1666,
+     "end": 1670,
+     "kind": "docstring",
+     "qualname": "ops_module_hint",
+     "n_lines": 5,
+     "history_id": null,
+     "helper": "ops_module_hint",
+     "scratchpad_refs": [],
+     "xref_to_outside": [
+      "`PEER_MODULE`, named through a function (not referenced directly by `check_contract_170_declarations`'s own f-strings) so this check's error-message wording stays isomorphic across peers the same way the `_fN_message` builders above do (peer-IDENTICAL name, peer-SPECIFIC value read from this module's own `PEER_MODULE` constant)."
+     ]
+    }
+   ],
+   "helpers_without_node": [],
+   "history_tokens_file": 42,
+   "date_lines_file": [
+    23,
+    44,
+    72,
+    241,
+    266,
+    529,
+    559,
+    570,
+    661,
+    680,
+    888,
+    917,
+    971,
+    1043,
+    1068
+   ],
+   "colon_hash_lines": [
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    69,
+    70,
+    71,
+    72,
+    73,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    86,
+    87,
+    88,
+    91,
+    92,
+    93,
+    94,
+    97,
+    98,
+    101,
+    102,
+    103,
+    104,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    114,
+    121,
+    122,
+    123,
+    124,
+    125,
+    128,
+    129,
+    132,
+    133,
+    134,
+    135,
+    136,
+    856,
+    857,
+    858,
+    859,
+    862,
+    863,
+    864,
+    865,
+    866,
+    867,
+    868,
+    869,
+    870,
+    871,
+    872,
+    873,
+    874,
+    875,
+    876,
+    877,
+    878,
+    879,
+    880,
+    881,
+    882,
+    883,
+    922,
+    923,
+    924,
+    925,
+    926,
+    927,
+    928,
+    931,
+    932,
+    933,
+    934,
+    935,
+    936,
+    937,
+    938,
+    941,
+    942,
+    943,
+    944,
+    945,
+    998,
+    999,
+    1000,
+    1001,
+    1525,
+    1526,
+    1527,
+    1528
+   ],
+   "history_tokens_in_targets": 24,
+   "summary": {
+    "target_blocks": 31,
+    "target_docstring": 3,
+    "target_comment": 28,
+    "target_lines": 319,
+    "blocks_with_tokens": 9,
+    "lines_in_blocks_with_tokens": 175,
+    "date_lines_in_targets": [
+     23,
+     44,
+     72,
+     529,
+     661,
+     888,
+     917,
+     1068
+    ],
+    "marker_sentences": 8,
+    "marker_blocks": 6,
+    "xref_sentences": 12,
+    "safety_sentences": 5,
+    "protected_sentences": 6,
+    "position_sentences": 3,
+    "safety_blocks": 4,
+    "ten_plus_blocks": [
+     [
+      1,
+      47
+     ],
+     [
+      361,
+      370
+     ],
+     [
+      758,
+      797
+     ],
+     [
+      862,
+      883
+     ],
+     [
+      887,
+      920
+     ],
+     [
+      1201,
+      1236
+     ]
+    ],
+    "ten_plus_lines": 189,
+    "ten_plus_all_blocks": 19,
+    "scratchpad_target_lines": [
+     24,
+     760,
+     761,
+     871
+    ],
+    "scratchpad_helper_blocks": [
+     [
+      266,
+      271,
+      [
+       "{scratchpad}/"
+      ]
+     ],
+     [
+      441,
+      460,
+      [
+       "scratchpad/"
+      ]
+     ],
+     [
+      803,
+      823,
+      [
+       "{scratchpad}/"
+      ]
+     ]
+    ]
+   }
+  }
+ }
+}

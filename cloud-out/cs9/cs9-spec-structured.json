@@ -1,0 +1,388 @@
+{
+ "base": "092e1a1",
+ "parent": "092e1a1",
+ "module": "r2db-api/src/r2db_api/structured.py",
+ "companion": "docs/code-history/r2db-api/structured.md",
+ "excluded_symbols": [
+  "validate_enum_declaration",
+  "enum_member_matches_type",
+  "normalize_request_for_plan",
+  "compute_plan_token",
+  "normalize_request_for_idempotency",
+  "idempotency_digest"
+ ],
+ "line_range": [
+  1,
+  1867
+ ],
+ "ch_range": [
+  "CH-0990",
+  "CH-1059"
+ ],
+ "blocks": [
+  {
+   "ch": "CH-0990",
+   "line": 195,
+   "edits": [
+    {
+     "old": "WP-2 review minor (e): ",
+     "new": ""
+    }
+   ]
+  },
+  {
+   "ch": "CH-0991",
+   "line": 221,
+   "edits": [
+    {
+     "old": "Phase 6 WP-2 (design D-3(iv)): ",
+     "new": ""
+    }
+   ]
+  },
+  {
+   "ch": "CH-0992",
+   "line": 226,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (1), WP-2a): ",
+     "new": "Contract 1.7.0 (D-2 (1)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-0993",
+   "line": 231,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (1), WP-2a): ",
+     "new": "Contract 1.7.0 (D-2 (1)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-0994",
+   "line": 236,
+   "edits": [
+    {
+     "old": "WP-2 review M-3: ",
+     "new": ""
+    }
+   ]
+  },
+  {
+   "ch": "CH-0995",
+   "line": 246,
+   "edits": [
+    {
+     "old": "Review blocker B-1: ",
+     "new": ""
+    }
+   ]
+  },
+  {
+   "ch": "CH-0996",
+   "line": 309,
+   "edits": [
+    {
+     "old": "(coordinator F2, 2026-09-04 review)",
+     "new": "(coordinator F2)"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0997",
+   "line": 328,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (1), WP-2a): ",
+     "new": "Contract 1.7.0 (D-2 (1)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-0998",
+   "line": 338,
+   "edits": [
+    {
+     "old": "check above. Monitor ruling N-2 (rulings-r2-closure.md,\n                # WP-2a closure): `field` names the request-internal key",
+     "new": "check above. `field` names the request-internal key"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0999",
+   "line": 350,
+   "edits": [
+    {
+     "old": "Monitor ruling N-2 (rulings-r2-closure.md): same key,",
+     "new": "same key,"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1001",
+   "line": 444,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (1), WP-2a): ",
+     "new": "Contract 1.7.0 (D-2 (1)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1002",
+   "line": 470,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (5), WP-2a; monitor ruling A/B-2): ",
+     "new": "Contract 1.7.0 (D-2 (5); monitor ruling A/B-2): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1003",
+   "line": 514,
+   "edits": [
+    {
+     "old": "Monitor ruling A: `enum: null`",
+     "new": "`enum: null`"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1004",
+   "line": 579,
+   "edits": [
+    {
+     "old": "dry_run/plan (D-4, WP-2b) ",
+     "new": "dry_run/plan (D-4) "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1007",
+   "line": 757,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (4), WP-2a): ",
+     "new": "Contract 1.7.0 (D-2 (4)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1009",
+   "line": 827,
+   "edits": [
+    {
+     "old": "(contract 1.7.0 D-5, WP-2c)",
+     "new": "(contract 1.7.0 D-5)"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1010",
+   "line": 891,
+   "edits": [
+    {
+     "old": "WP-2 review minor (c): ",
+     "new": ""
+    }
+   ]
+  },
+  {
+   "ch": "CH-1011",
+   "line": 950,
+   "edits": [
+    {
+     "old": "`catalog()` below (WP-2b) so",
+     "new": "`catalog()` below so"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1012",
+   "line": 967,
+   "edits": [
+    {
+     "old": "Contract 1.7.0 (D-2 (1), WP-2a): ",
+     "new": "Contract 1.7.0 (D-2 (1)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1013",
+   "line": 1010,
+   "edits": [
+    {
+     "old": "Ruling U-7 (WP-6d): thin lock wrapper",
+     "new": "thin lock wrapper"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1014",
+   "line": 1039,
+   "edits": [
+    {
+     "old": "(contract 1.7.0, D-4, WP-2b):",
+     "new": "(contract 1.7.0, D-4):"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1015",
+   "line": 1077,
+   "edits": [
+    {
+     "old": "ruling I-3, WP-2c): ",
+     "new": "ruling I-3): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1016",
+   "line": 1109,
+   "edits": [
+    {
+     "old": "(D-7 (3), WP-2e): ",
+     "new": "(D-7 (3)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1017",
+   "line": 1129,
+   "edits": [
+    {
+     "old": "Phase 4 (design D-2): whether",
+     "new": "whether"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1018",
+   "line": 1139,
+   "edits": [
+    {
+     "old": "WP-2 review M-2: per-operation",
+     "new": "per-operation"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1019",
+   "line": 1146,
+   "edits": [
+    {
+     "old": "Monitor ruling M-3/D (rulings-wp2a-review.md, rulings-\n                # wp3a-review.md D): `operation_index`",
+     "new": "`operation_index`"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1020",
+   "line": 1183,
+   "edits": [
+    {
+     "old": "Phase 4 (design D-2/D-10): the pre-commit",
+     "new": "the pre-commit"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1022",
+   "line": 1209,
+   "edits": [
+    {
+     "old": "(D-7 (3), WP-2e): ",
+     "new": "(D-7 (3)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1023",
+   "line": 1225,
+   "edits": [
+    {
+     "old": "(D-2 (4), WP-2a): ",
+     "new": "(D-2 (4)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1024",
+   "line": 1232,
+   "edits": [
+    {
+     "old": "Monitor ruling M-3/D (rulings-wp2a-review.md, D-3 (2)): every",
+     "new": "every"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1025",
+   "line": 1301,
+   "edits": [
+    {
+     "old": "Phase 4 (design D-2): reaching",
+     "new": "reaching"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1026",
+   "line": 1461,
+   "edits": [
+    {
+     "old": "Ruling U-7 (WP-6d): thin lock wrapper",
+     "new": "thin lock wrapper"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1027",
+   "line": 1488,
+   "edits": [
+    {
+     "old": "(contract 1.7.0, D-4, WP-2b):",
+     "new": "(contract 1.7.0, D-4):"
+    },
+    {
+     "old": "review round F-8 (`{scratchpad}/\n        rulings-r4.md`): a bare `int`",
+     "new": "review round F-8: a bare `int`"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1029",
+   "line": 1543,
+   "edits": [
+    {
+     "old": "WP-2 review M-2: indexes",
+     "new": "indexes"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1033",
+   "line": 1856,
+   "edits": [
+    {
+     "old": "(D-7 (3), WP-2e): ",
+     "new": "(D-7 (3)): "
+    }
+   ]
+  },
+  {
+   "ch": "CH-1034",
+   "line": 1862,
+   "edits": [
+    {
+     "old": "Review round F-8: always",
+     "new": "always"
+    }
+   ]
+  }
+ ]
+}

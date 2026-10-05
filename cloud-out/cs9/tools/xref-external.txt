@@ -1,0 +1,140 @@
+== r2db-api/src/r2db_api/structured.py: 30 symbols
+MitateDB-api/src/mitatedb_api/backend.py:527: # The two methods below are what `ApplicationCell._idempotency_check`
+MitateDB-api/src/mitatedb_api/backend_sqlite.py:235: """Phase 4 (design, "擬似 tx"): SQLite's own `sqlite3` driver, in this connection's default (legacy) isolation mode, auto-commits a DDL statement (`CREATE TABLE`/`ALTER TABLE`) IMMEDIATELY -- a subsequent `self._db.rollbac
+MitateDB-api/src/mitatedb_api/backend_sqlite.py:632: # no commit/rollback here -- mirrors `insert_in_transaction`'s own reasoning above. Runs inside the transaction `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in th
+MitateDB-api/src/mitatedb_api/backend_sqlite.py:802: # `ApplicationCell._idempotency_check` calls these two, not the three methods above. `scope` is accepted for the signature every backend shares and ignored: the request scope holds this backend's own lock for the whole r
+MitateDB-api/src/mitatedb_api/backend_sqlite.py:811: # `transact()`'s own single-batch path: `ApplicationCell.transact` calls this directly (not through a DDL method's own `idempotency_record` parameter), immediately before its own `self._backend.commit()` -- a failed batc
+MitateDB-api/src/mitatedb_api/backend_sqlite.py:816: # this dict write above is NOT part of `self._db`'s own real transaction -- `self.rollback()` (`self._db.rollback()`) cannot undo it, so `ApplicationCell.transact`'s `except Exception:` handler calls this directly, uncon
+MitateDB-api/src/mitatedb_api/cell.py:627: operation below (`insert`/`read`/`update`/`delete`/`transact`,
+MitateDB-api/src/mitatedb_api/cell.py:628: `catalog`/`schema_revision` immediately above, `ApplicationRuntime.
+MitateDB-api/src/mitatedb_api/cell.py:721: a backend method (or `transact` below) calls itself, immediately
+MitateDB-api/src/mitatedb_api/cell.py:1908: like `catalog` immediately below and r2db's own `catalog()`/
+MitateDB-api/src/mitatedb_api/cell.py:2113: # back through, unlike `transact()`/the schema methods below,
+MitateDB-api/src/mitatedb_api/cell.py:2251: BOTH `ApplicationCell.update` below AND `transact()`'s own
+MitateDB-api/src/mitatedb_api/cell.py:2337: `ApplicationCell.delete` below AND `transact()`'s own
+MitateDB-api/src/mitatedb_api/cell.py:2549: # missing_required_fields`'s own docstring. This is `transact`'s
+MitateDB-api/src/mitatedb_api/cell.py:2551: # insert path; `ApplicationCell.insert` above is this peer's
+MitateDB-api/src/mitatedb_api/cell.py:2629: `batch_items` check immediately above it in `transact()`: both
+MitateDB-api/src/mitatedb_api/cell.py:3778: `ApplicationCell.read` (`cell.py` above) has no return-shape room
+MitateDB-api/src/mitatedb_api/cell.py:3799: to `ApplicationCell.read_page`, whose own docstring states this
+MitateDB-api/src/mitatedb_api/cell.py:3844: # `ApplicationCell.transact`'s own identical-purpose comment for
+MitateDB-api/src/mitatedb_api/cell.py:4003: `alter_field`'s own docstring on `ApplicationCell` above) -- this
+MitateDB-api/src/mitatedb_api/delete_confirmation.py:54: -- `ApplicationCell.delete` below (in `cell.py`) always calls this only after
+MitateDB-api/src/mitatedb_api/field_types.py:123: `validate_enum_declaration` below rejects the declaration itself
+MitateDB-api/src/mitatedb_api/http.py:489: # Phase 10 WP-8c (design --): `limit_holder`/`max_concurrency` are the SAME `_LimitStateHolder` instance (and its own declared `concurrency` bound) `main.build_app` already constructs and injects into every `ApplicationC
+MitateDB-api/src/mitatedb_api/http.py:541: Phase 10 WP-8c (design; fail-closed as of): pre-authentication concurrency admission -- mirrors r2db `service.py::DataService.acquire_concurrency_slot`'s own identical purpose. `http.py`'s own route handlers below enter 
+MitateDB-api/src/mitatedb_api/http.py:633: # Phase 10 WP-8c: every handler below now enters `service.acquire_concurrency_slot()` as its OWN first statement, before `_authenticate` -- the data-plane evaluation order is now BYTE BOUND (`RequestByteBoundMiddleware`,
+MitateDB-api/src/mitatedb_api/http.py:747: # Phase 9 WP-3b rework: `values` is unconditionally present here (`raw.get("values") or {}`, never conditional on `"values" in raw`) -- this is this peer's own INTERNAL execution-item vocabulary (`ApplicationCell.transac
+MitateDB-api/src/mitatedb_api/http.py:856: # Phase 9 WP-3b: `dry_run`/`plan` now reach `transact()` for real -- both defaulted to their own byte-compatible absence (`False`/`None`) above, so an unchanged caller's own request is unaffected.
+MitateDB-api/src/mitatedb_api/http.py:887: P35 WP-2 (R-3, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2): the cross-entity counterpart of `_mutation_item` above -- reads `entity` from EACH operation itself (contract `ScopedMutation`, `Mutation
+MitateDB-api/src/mitatedb_api/http.py:916: Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` now reach `session.transact` for real, exactly like `post_mutate` above (I-9: this peer's own `transact()` dispatcher is shared by both endpoints, so both honor them identi
+MitateDB-api/src/mitatedb_api/http.py:1064: # M-3 (independent): `SchemaOperationRequest.field_type` is a valid top-level property of this request shape (the contract gives it no per-operation `if`/`then` narrowing that would forbid it on `create_entity`), so `_ch
+MitateDB-api/src/mitatedb_api/main.py:515: # Handed to every `ApplicationCell` this loop builds below, so
+MitateDB-api/src/mitatedb_api/main.py:604: # SAME instance every `ApplicationCell` built above already shares --
+MitateDB-api/src/mitatedb_api/request_vocabulary.py:10: # `upsert` is still refused unconditionally by `transact()` below (in `cell.py`) -- this
+MitateDB-api/src/mitatedb_api/service.py:43: # immediately above already established. Every `ApplicationCell`
+MitateDB-api/tests/test_audit_query.py:2568: # `compute_plan_token` pair immediately above). WP-2d's own `limits.
+MitateDB-api/tests/test_audit_query_reader_errors.py:86: given `psycopg.Error` -- lets the mock-level tests below drive `query`
+MitateDB-api/tests/test_constraints_declaration.py:197: only on `ApplicationCell.insert` above."""
+MitateDB-api/tests/test_denial_details_and_request_id.py:206: below), and r2db-api's own `structured.py::_apply` names this same
+MitateDB-api/tests/test_dry_run_and_plan.py:616: # destructive`/`_non_destructive` above cover `transact()`'s own two audit
+MitateDB-api/tests/test_dry_run_and_plan.py:990: `normalize_request_for_plan`, so the `TypeError` the test above proves
+MitateDB-api/tests/test_idempotency_concurrency.py:251: TWO INDEPENDENT `ApplicationCell`s (see `_pg_pair`'s own docstring for
+conformance-tests/CONDITIONS.md:53: | C-24 | A request-scoped `budget` narrows a declared bound downward only: a bound narrowed by `budget` refuses at the narrowed position with `LIMIT_EXCEEDED` naming that limit class, a `budget` above the deployment's ow
+conformance-tests/CONDITIONS_HISTORY.md:49: executable (four adapters) -- `test_c05_limit_declaration_agreement.py`, `@pytest.mark.condition("C-05")`; runs in-process and HTTP on both peers (design D-6). V1 (self-consistency) runs on all 4 plugs; V2 (declared boun
+conformance-tests/CONDITIONS_HISTORY.md:68: executable (four adapters) -- `conformance-tests/test_c06_destructive_confirmation.py`, `@pytest.mark.condition("C-06")`; runs against `r2db-api` (in-process), `r2db-api-http`, `MitateDB-api`, and `MitateDB-api-http`. Br
+conformance-tests/CONDITIONS_HISTORY.md:73: **A second, narrower disclosed-floor branch within the strict side (phase 3 WP-2.5 record, deferred from WP-1.5):** `_batch_delete_capability_absent`'s own `CAPABILITY_UNSUPPORTED`-based absence shortcut (guarding `test_
+conformance-tests/CONDITIONS_HISTORY.md:220: executable (four adapters) -- `conformance-tests/test_c16_cross_entity_atomicity.py`, `@pytest.mark.condition("C-16")`, port v1.7 (`adapter.ScopedBatchOperation`/`attempt_cross_entity_batch`, `docs/design/PHASE35_CROSS_E
+r2db-api/src/r2db_api/backend.py:10: signature-for-signature; `ApplicationCell` is declared conforming below via
+r2db-api/src/r2db_api/backend.py:154: identical single-tx-exit-point discipline to `transact` above --
+r2db-api/src/r2db_api/capabilities_document.py:60: # (see `query`/`mutate`/`schema`/`catalog` below) (in `service.py`) -- this
+r2db-api/src/r2db_api/control_plane.py:941: # Review blocker B-1: shape validation of the request's own `destructive`/`confirmation` fields (contract `CredentialRevokeRequest.destructive: {"type": "boolean"}` / `.confirmation: {"type": "string", ...}`) -- applied 
+r2db-api/src/r2db_api/ops.py:73: # the exact shape both of this codebase's application-credential minters produce -- this module's own `_new_credential_id` (`issue-credential`) and the in-band `control_plane._new_credential_id`, `_CREDENTIAL_ID_PREFIX` 
+r2db-api/src/r2db_api/postgres.py:1186: """One entity's `EntityDescriptor` (contract shape) -- factored out of `catalog()` below so `apply_schema`'s own `dry_run` response can build the identical descriptor for the ONE entity a schema operation targets, re-rea
+r2db-api/src/r2db_api/postgres.py:1372: # the side-table read (a nested SAVEPOINT + SELECT + RELEASE SAVEPOINT, `_load_field_constraints` below) is skipped entirely when `with_constraints` is `False` -- `query` (D-2 (2): "query の predicate 値は enum を検査しない") nev
+r2db-api/src/r2db_api/postgres.py:1381: """Contract 1.7.0: reads the side-table registry (`public._r2db_field_constraints`, migration `0010_field_constraints_upgrade.sql`) -- the declaration's own source of truth (physical column constraints are never added, §
+r2db-api/src/r2db_api/postgres.py:1440: """`drop_entity`'s own registry cleanup, protected the same way `_load_field_constraints` above protects its own read -- a real PostgreSQL SAVEPOINT (a NESTED transaction, `conn` is already inside `apply_schema`'s own ou
+r2db-api/src/r2db_api/postgres.py:1477: # `_idempotency_reserve` (below) can therefore no longer actually
+r2db-api/src/r2db_api/postgres.py:1520: """table-level advisory lock serializing `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys -- taken directly in the OUTER transaction, BEFORE calling `_idempotency_reserve`, never inside that method's own n
+r2db-api/src/r2db_api/postgres.py:1546: Every request of this backend takes its advisory locks in ONE global order and never takes a lock above one it already holds: 1 per-key lock, 2 this lock, 3 entity lock, 4 count lock, then the table and row locks. A data
+r2db-api/src/r2db_api/postgres.py:1605: # M-6 (addendum 2 closure audit): `ON CONFLICT (idempotency_key) DO UPDATE`, not a bare `INSERT` -- a resend of a key whose stored record was just treated as absent (`_idempotency_record_has_request_id` returned false, a
+r2db-api/src/r2db_api/postgres.py:1765: # whether this batch passed through the DESTRUCTIVE_CONFIRMATION_V1 choke -- see `ApplicationCell.transact`'s identical comment (parity).
+r2db-api/src/r2db_api/postgres.py:1783: # Contract 1.7.0 (addendum 2 S-b, ruling): the idempotency lookup -- see `ApplicationCell.transact`'s identical comment for the ordering rationale (after bounds, before target existence). A `dry_run` never consults or wr
+r2db-api/src/r2db_api/postgres.py:1788: # taken in THIS outer transaction, before `_idempotency_lookup` opens its own nested savepoint -- see `_idempotency_key_lock`'s own docstring for why the lock must sit here and not inside that savepoint.
+r2db-api/src/r2db_api/postgres.py:1991: # above and with `ApplicationCell._apply`.
+r2db-api/src/r2db_api/postgres.py:2010: # reaching this point means the confirmation choke above did not raise -- confirmed-destructive, same signal `ApplicationCell._apply` returns.
+r2db-api/src/r2db_api/postgres.py:2135: # Contract 1.7.0: this entity's own declared constraints, same source `_apply` above reads.
+r2db-api/src/r2db_api/postgres.py:2150: # an upsert that resolves to an update is not"). Unlike `_apply`'s plain `insert` branch, this backend cannot know ahead of the two real SQL statements below whether THIS upsert will resolve to an insert or an update (co
+r2db-api/src/r2db_api/postgres.py:2239: """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4): identical single tx-exit-point discipline to `transact` above -- the exit point sits right before `_bump_revision`/the pre-commit hook, inside the SAME `with conn
+r2db-api/src/r2db_api/postgres.py:2248: # see `transact`'s identical `hook_fired` comment -- `True` only once the durable pre-commit row has already committed on its own connection, which is what lets the `except psycopg.Error` clause below tell a post-hook da
+r2db-api/src/r2db_api/postgres.py:2273: # `ApplicationCell.apply_schema`'s identical comment).
+r2db-api/src/r2db_api/postgres.py:2279: # see `transact`'s identical comment -- taken in THIS outer transaction, before `_idempotency_lookup`'s own nested savepoint.
+r2db-api/src/r2db_api/postgres.py:2303: # capacity checked before this request executes anything. table-level count lock, same outer-transaction placement as `transact` above.
+r2db-api/src/r2db_api/postgres.py:2346: # defense-in-depth -- `bind_schema_operation` above already rejects this exact name (structured.py's own `_reject_reserved_entity_name`, the real, load-bearing check for BOTH cell implementations), but this backend's own
+r2db-api/src/r2db_api/postgres.py:2555: # as the DDL/registry writes above -- see `transact`'s
+r2db-api/src/r2db_api/postgres.py:2565: # reasoning as `transact`'s identical comment.
+r2db-api/src/r2db_api/postgres.py:2592: # see `transact`'s identical comment.
+r2db-api/src/r2db_api/postgres_sql.py:206: # call sites of `_where_clause` (`query`/`_apply` above (in `postgres.py`)) already
+r2db-api/src/r2db_api/schema_binding.py:28: # `field_types`, below (in `structured.py`)) -- it is translated to the pre-existing internal
+r2db-api/src/r2db_api/schema_binding.py:29: # `None` representation at bind time (see `bind_schema_operation` below (in `structured.py`)),
+r2db-api/src/r2db_api/schema_binding.py:40: # `bind_schema_operation`'s own `if`/`elif` chain below (in `structured.py`) and `service.py`'s
+r2db-api/src/r2db_api/schema_binding.py:72: `validate_enum_declaration` below (in `structured.py`)) -- `None` means no `enum` is
+r2db-api/src/r2db_api/schema_binding.py:142: #: convention since this constant, unlike the two functions below (in `structured.py`), was
+r2db-api/src/r2db_api/schema_binding.py:148: """Internal-only signal `validate_enum_declaration` below (in `structured.py`) raises when
+r2db-api/src/r2db_api/schema_binding.py:164: below (in `structured.py`) uses (monitor ruling m-1, rulings-wp2a-review.md): `field` is
+r2db-api/src/r2db_api/schema_binding.py:192: # `None`, see `bind_schema_operation` below (in `structured.py`)) to this file's own internal
+r2db-api/src/r2db_api/service.py:275: post_query` instead of `query` above, since building a real
+r2db-api/src/r2db_api/service.py:334: """The HTTP-facing shape (`{affected, assigned_addresses}`, `spec/data-service-api.v1.json`'s `MutationResult`) -- used by `http.post_mutate` instead of `mutate` above, mirroring the `query`/`query_page` split.
+r2db-api/src/r2db_api/service.py:336: `dry_run`/`plan` (contract 1.7.0, D-4): real, given full effect below -- `capabilities().dry_run` is `enabled` as of this commit. `budget` (contract 1.7.0, D-6) and `idempotency_key` (contract 1.7.0, D-5) are likewise re
+r2db-api/src/r2db_api/service.py:390: # `idempotency_key` is INCLUDED in the plan digest (only `plan`/`dry_run` are excluded there, `normalize_request_for_plan`'s own 2-key exclusion) even though it is excluded from its OWN digest (`normalize_request_for_ide
+r2db-api/src/r2db_api/service.py:456: # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level request object a `plan` commits to -- `operation` itself already IS that object (`SchemaOperationRequest`'s own flat shape), minus `plan`/`dry_run` (S-a's exclusi
+r2db-api/src/r2db_api/service_results.py:32: `spec/data-service-api.v1.json`'s `MutationResult`. Mirrors the `query`/`query_page` split: `mutate` below (in `service.py`) stays byte-for-byte backward compatible (a bare `int`, the affected count) for every existing c
+r2db-api/src/r2db_api/storage_outcomes.py:89: # below `transact`'s own idempotency lookup (target existence,
+r2db-api/src/r2db_api/value_types.py:115: # enum_declaration`'s own `_ENUM_ELIGIBLE_TYPES` gate above (in `structured.py`) already
+r2db-api/tests/test_audit_query.py:1516: # `apply_schema` above is now a thin `with self._idempotency_
+r2db-api/tests/test_audit_query.py:2788: # `compute_plan_token` pair immediately above). WP-2d's own `limits.
+r2db-api/tests/test_dry_run_and_plan.py:332: docstring claim on `transact` above ("A plain apply pays no `json.
+r2db-api/tests/test_foundation.py:3217: # tests above already proved `ApplicationCell` itself could.
+r2db-api/tests/test_l1_details_vocabulary_ast_scan.py:281: #: in `transact` / `apply_schema` (net +23 lines) sit ABOVE
+security/CONTROL_MAPPING_HISTORY.md:396: **r2db-api, verbatim detail not captured by the pre-condensation-original snapshot above (D-1 rework restoration, WP-7 差し戻し 3rd round)**: `structured.py` requires operation-specific confirmation for delete/drop, includin
+security/CONTROL_MAPPING_HISTORY.md:581: `ApplicationCell.transact` uses one local transaction with rollback on rejected operation; `test_transaction_rolls_back`. **Cross-entity atomic unit, closed phase 3.5 WP-2** (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRAC
+security/CONTROL_MAPPING_HISTORY.md:666: **Application-plane audit** (the pre-phase-4 foundation, kept as the record of what preceded the durable sink): `AuditSink` uses immutable snapshots and detail/event allowlists; representative secret/row-value test in `t
+security/CONTROL_MAPPING_HISTORY.md:670: `ControlAuthority` emits canonical lifecycle/control-failure events including denied audit deletion; application facade exposes no audit accessor; `AuditSink` immutable snapshots and forbidden-field guard; `test_control_
+== MitateDB-api/src/mitatedb_api/platform_declarations.py: 61 symbols
+MitateDB-api/conformance/conformance_adapter_mitatedb.py:961: # `__init__` above) -- every one of the 14 port v1.5 in-band/ritual/
+MitateDB-api/conformance/conformance_adapter_mitatedb.py:1398: # `__init__` above), so every one of the three methods below takes the
+MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:1727: # See `self._cells`'s own docstring (`__init__`) for why this is
+MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:1868: # LRU cache (`_MAX_OPEN_CELLS`, `__init__`'s own comment) that
+MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:1912: # `self._control_client`, `__init__` above) -- every one of the 14
+MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:2224: # SAME real function `__init__` above already calls) against the
+MitateDB-api/conformance/real_server_mitatedb.py:460: api` role is left below `check_role_connection_limits`'s own floor,
+MitateDB-api/src/mitatedb_api/backend_sqlite.py:492: Code review §2 F / 監督裁定 F: unlike `backend_postgres.PostgresBackend`'s own implementation, this backend takes no `LOCK TABLE` before its own row scan below -- this whole method is one uninterruptible Python call on one p
+MitateDB-api/src/mitatedb_api/control_composition.py:289: # the `RoleTimeoutCatalog` rows already read above for EVERY role
+MitateDB-api/src/mitatedb_api/http.py:543: `__init__`'s own fail-closed guard guarantees `self._limit_holder`/`self._max_concurrency` are never `None` here -- there is no more no-op branch to fall through to; an instance that could not be given both never exists 
+MitateDB-api/tests/test_audit_query.py:2722: # itself. Unlike `check_role_connection_limits` (excluded above: real
+MitateDB-api/tests/test_ops_verify_declarations.py:1151: `PlatformDeclarationError`, so `pytest.raises` below would fail to see
+conformance-tests/test_pytest_config_symmetry.py:54: `__init__.py` above any of them), so pytest gives all four the identical
+r2db-api/conformance/conformance_adapter_r2db.py:748: # _control_service`, `__init__` above) -- every one of the 13 port
+r2db-api/conformance/conformance_adapter_r2db_http.py:341: # role), see `__init__` below.
+r2db-api/conformance/conformance_adapter_r2db_http.py:346: # build_control_app`, `__init__` below), never `<prefix>_control`.
+r2db-api/conformance/conformance_adapter_r2db_http.py:351: # (`__init__` below) connects as exactly this role, never `<prefix>_
+r2db-api/conformance/conformance_adapter_r2db_http.py:574: # (`secrets.token_hex(4)`, see `__init__` below) -- 16 characters total,
+r2db-api/conformance/conformance_adapter_r2db_http.py:2681: # client, constructed the SAME way `__init__` above constructs the
+r2db-api/conformance/real_server_r2db.py:528: `CONNECTION LIMIT 10` -- below `check_role_connection_limits`'s own
+r2db-api/src/r2db_api/capabilities_document.py:192: # `surfaces` is an optional key -- present only when this instance was constructed with one (`__init__`'s own comment on `self._surfaces`) (in `service.py`). Never a
+r2db-api/src/r2db_api/control_plane.py:666: # Phase 6 WP-2: optional key, present only when this instance was constructed with one (`__init__`'s own comment on `self._surfaces`). A live control-plane process' own control surface is, by definition, provided (this m
+r2db-api/src/r2db_api/control_plane.py:671: # with one -- see `__init__`'s own comment on
+r2db-api/src/r2db_api/main.py:585: # ceilings` `check_max_connections_headroom` right below reads.
+r2db-api/src/r2db_api/platform_declarations.py:21: message-building helpers below (`_f1_message`/`_f2_message`/`_f8_message`/
+r2db-api/src/r2db_api/platform_declarations.py:426: # directly in `read_platform_declarations` below, as `"process_ceilings"
+r2db-api/src/r2db_api/platform_declarations.py:511: `check_writer_role_timeouts` below, design §3.7 step 6: "行が無い場合
+r2db-api/src/r2db_api/platform_declarations.py:556: `check_control_surface_consistency` below)."""
+r2db-api/src/r2db_api/platform_declarations.py:813: # change, same honest scope `check_writer_role_timeouts` above documents
+r2db-api/src/r2db_api/platform_declarations.py:944: # (`_table_owner`, below), not merely "no grants match its identity" --
+r2db-api/src/r2db_api/platform_declarations.py:977: view (like `pg_db_role_setting`, `_role_setting_rows`'s own comment
+r2db-api/src/r2db_api/platform_declarations.py:993: GRANT, which is exactly the shape `_roles_with_table_privilege` above
+r2db-api/src/r2db_api/platform_declarations.py:1336: a FAILING judgment raises instead, `_f18_message` below): the numbers
+r2db-api/src/r2db_api/platform_declarations.py:1375: opens (`headroom_lower_bound`, above) plus `superuser_reserved_
+r2db-api/tests/test_application_audit.py:2848: # claim `check_writer_role_timeouts`'s own docstring makes (design D-1(c)),
+r2db-api/tests/test_audit_query.py:2942: # itself. Unlike `check_role_connection_limits` (excluded above: real
+r2db-api/tests/test_ops_verify_declarations.py:1127: `PlatformDeclarationError`, so `pytest.raises` below would fail to see

@@ -1,0 +1,24 @@
+[
+ {
+  "ch_reserved_unused": "CH-1061",
+  "line": 69,
+  "reason": "REJECTED: ruling-date phrase inside a content paren whose `: ` follows -- FAIL (§4.1 (3)) retained text has no order-preserving match",
+  "edits": [
+   {
+    "old": "allocation, requester ruling\n#: 2026-09-05: MitateDB",
+    "new": "allocation: MitateDB"
+   }
+  ]
+ },
+ {
+  "ch_reserved_unused": "CH-1063",
+  "line": 525,
+  "reason": "REJECTED: ruling-date phrase at a sentence end, outside any paren (no allowed operation) -- FAIL (§4.1 (3)) cannot delete a whole sentence carrying a protected reference",
+  "edits": [
+   {
+    "old": "design\n# D-2(f), monitor ruling 2026-09-05.",
+    "new": "design\n# D-2(f)."
+   }
+  ]
+ }
+]

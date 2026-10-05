@@ -1,0 +1,138 @@
+{
+ "base": "092e1a1",
+ "parent": "092e1a1",
+ "module": "MitateDB-api/src/mitatedb_api/platform_declarations.py",
+ "companion": "docs/code-history/MitateDB-api/platform_declarations.md",
+ "excluded_symbols": [
+  "HeadroomReport",
+  "PlatformDeclarationError",
+  "PlatformDeclarations",
+  "ProcessCeilings",
+  "RoleTimeoutCatalog",
+  "Surfaces",
+  "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+  "_API_ROLE_STORE_COUNT",
+  "_AUDITREADER_ROLE_POOL_FLOOR",
+  "_CONTROLPLANE_ROLE_POOL_FLOOR",
+  "_ROLE_CLASSES",
+  "_count_registered_applications",
+  "_f10_message",
+  "_f11_message",
+  "_f13_message",
+  "_f15_shape_message",
+  "_f15_value_message",
+  "_f16_message",
+  "_f17_message",
+  "_f18_message",
+  "_f19_message",
+  "_f1_message",
+  "_f21_acl_holders",
+  "_f21_message",
+  "_f2_message",
+  "_f3_message",
+  "_f3c_message",
+  "_f4_message",
+  "_f4b_window_message",
+  "_f4b_writer_roles_message",
+  "_f5_message",
+  "_f6_forward_message",
+  "_f6_reverse_message",
+  "_f7_message",
+  "_f8_message",
+  "_f9_message",
+  "_read_connection_headroom_settings",
+  "_roles_with_table_privilege",
+  "_table_owner",
+  "check_application_collations",
+  "check_auditreader_statement_timeout",
+  "check_contract_170_declarations",
+  "check_control_surface_consistency",
+  "check_denial_window_function",
+  "check_max_connections_headroom",
+  "check_request_rate_function",
+  "check_writer_role_timeouts",
+  "derive_visibility_lag_ms",
+  "headroom_lower_bound",
+  "ops_module_hint",
+  "read_declared_role_timeouts",
+  "read_effective_timeouts_ms",
+  "read_platform_declarations",
+  "reject_removed_surface_env",
+  "reject_removed_timeout_env",
+  "require_control_surface_declared",
+  "validate_audit_writer_roles_value",
+  "validate_coalescing_window_value",
+  "validate_process_ceilings_value",
+  "validate_surfaces_value"
+ ],
+ "line_range": [
+  1,
+  1713
+ ],
+ "ch_range": [
+  "CH-1060",
+  "CH-1129"
+ ],
+ "blocks": [
+  {
+   "ch": "CH-1060",
+   "line": 1,
+   "edits": [
+    {
+     "old": "(no cross-peer sharing, requester\nruling 2026-09-03)",
+     "new": "(no cross-peer sharing)"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1062",
+   "line": 77,
+   "edits": [
+    {
+     "old": "#: Phase 10 WP-6b (design D-5 (ii)): the platform",
+     "new": "#: the platform"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1064",
+   "line": 656,
+   "edits": [
+    {
+     "old": "(design D-1(c) amendment 2026-09-05)",
+     "new": "(design D-1(c) amendment)"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1065",
+   "line": 862,
+   "edits": [
+    {
+     "old": "WP-3e rework T3 (ruling\n#: `{scratchpad}/rulings-r3-r7-flip.md` L-2/M-7) removed this module's\n#: former",
+     "new": "WP-3e rework T3 removed this\n#: module's former"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1066",
+   "line": 887,
+   "edits": [
+    {
+     "old": "(Phase 10 WP-4f, supervisor ruling 2026-09-09; peer-symmetric",
+     "new": "(peer-symmetric"
+    }
+   ]
+  },
+  {
+   "ch": "CH-1067",
+   "line": 1068,
+   "edits": [
+    {
+     "old": "# M-1 (WP-4 integration review 2026-09-10): a role",
+     "new": "# a role"
+    }
+   ]
+  }
+ ]
+}

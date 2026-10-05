@@ -1,0 +1,67 @@
+== r2db-api/src/r2db_api/structured.py (1867 lines)
+MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py:809: 'structured.py:1508' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=True
+conformance-tests/test_c20_constraint_declaration_agreement.py:154: 'r2db-api/src/r2db_api/structured.py:1821' form=path peer=r2db-api this_module=True cited_line_in_block=comment L1820-1827 in_range=True
+conformance-tests/test_c22_dry_run_and_plan.py:186: 'r2db-api/src/r2db_api/structured.py:1821' form=path peer=r2db-api this_module=True cited_line_in_block=comment L1820-1827 in_range=True
+r2db-api/conformance/conformance_adapter_r2db.py:319: 'structured.py:2269' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:319: '`:2294' form=continuation peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:319: '`:2697' form=continuation peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:319: '`:2718' form=continuation peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:1031: 'structured.py:2269' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:1031: '`:2294' form=continuation peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:1031: '`:2697' form=continuation peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:1031: '`:2718' form=continuation peer=ambiguous this_module=False cited_line_in_block=None in_range=False
+r2db-api/conformance/conformance_adapter_r2db.py:1286: 'structured.py:1183' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=True
+r2db-api/tests/test_foundation.py:617: 'structured.py:229' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=True
+r2db-api/tests/test_foundation.py:886: 'structured.py:212' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=True
+r2db-api/tests/test_foundation.py:1280: 'structured.py:702' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=True
+r2db-api/tests/test_l1_details_vocabulary_ast_scan.py:738: 'structured.py:1508' form=basename peer=ambiguous this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:371: 'r2db-api/src/r2db_api/structured.py:178-179' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:372: 'r2db-api/src/r2db_api/structured.py:884' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:686: 'r2db-api/src/r2db_api/structured.py:1145' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:686: '`:1599' form=continuation peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1244: 'r2db-api/src/r2db_api/structured.py:1796' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1245: 'r2db-api/src/r2db_api/structured.py:568' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1246: 'r2db-api/src/r2db_api/structured.py:1807' form=path peer=r2db-api this_module=True cited_line_in_block=comment L1803-1812 in_range=True
+security/CONTROL_MAPPING.md:1247: 'r2db-api/src/r2db_api/structured.py:22' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1248: 'r2db-api/src/r2db_api/structured.py:1784' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1604: 'r2db-api/src/r2db_api/structured.py:995' form=path peer=r2db-api this_module=True cited_line_in_block=None in_range=True
+-- total 26; this module 12; into comment/docstring lines 3; basename-only 8; continuation 7
+== MitateDB-api/src/mitatedb_api/platform_declarations.py (1713 lines)
+security/CONTROL_MAPPING.md:700: 'r2db-api/src/r2db_api/platform_declarations.py:1168' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:701: 'r2db-api/src/r2db_api/platform_declarations.py:1152' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:766: 'r2db-api/src/r2db_api/platform_declarations.py:499' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:773: 'r2db-api/src/r2db_api/platform_declarations.py:465' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:781: 'r2db-api/src/r2db_api/platform_declarations.py:1031' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:782: 'r2db-api/src/r2db_api/platform_declarations.py:1031' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:783: 'r2db-api/src/r2db_api/platform_declarations.py:1031' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:784: 'r2db-api/src/r2db_api/platform_declarations.py:1108' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:785: 'r2db-api/src/r2db_api/platform_declarations.py:1260' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:785: '`:1369' form=continuation peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:785: '`:1346' form=continuation peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:786: 'r2db-api/src/r2db_api/platform_declarations.py:1260' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:787: 'r2db-api/src/r2db_api/platform_declarations.py:1260' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:788: 'r2db-api/src/r2db_api/platform_declarations.py:1260' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:790: 'r2db-api/src/r2db_api/platform_declarations.py:1515' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:902: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1145' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:903: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1145' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1074: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:474' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1079: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:440' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1090: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1005' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1091: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1239' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1091: '`:1348' form=continuation peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1091: '`:1325' form=continuation peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1092: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1239' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1095: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1239' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1096: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1493' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1101: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1005' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1103: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1239' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1872: 'r2db-api/src/r2db_api/platform_declarations.py:1584' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1874: 'r2db-api/src/r2db_api/platform_declarations.py:1584' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1960: 'r2db-api/src/r2db_api/platform_declarations.py:748' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1961: 'r2db-api/src/r2db_api/platform_declarations.py:748' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1962: 'r2db-api/src/r2db_api/platform_declarations.py:748' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1963: 'r2db-api/src/r2db_api/platform_declarations.py:748' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:1964: 'r2db-api/src/r2db_api/platform_declarations.py:748' form=path peer=r2db-api this_module=False cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:2004: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:1562' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+security/CONTROL_MAPPING.md:2016: 'MitateDB-api/src/mitatedb_api/platform_declarations.py:719' form=path peer=MitateDB-api this_module=True cited_line_in_block=None in_range=True
+-- total 37; this module 15; into comment/docstring lines 0; basename-only 0; continuation 4
