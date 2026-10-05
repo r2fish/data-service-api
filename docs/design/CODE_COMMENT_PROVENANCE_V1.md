@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.31 (2026-10-05)**: §10.11 に変更セット 8 (r2db `platform_declarations.py` と MitateDB `control_plane.py`) の実施記録、クラウドセッションの下準備の取り込みの記録、教訓 3 行、次の候補を追記した。§10.10 は書き換えていない。
 - **v0.30 (2026-10-05)**: §10.10 に変更セット 7 の WP-7b (MitateDB `cell.py` の後半) の実施記録、受け入れ監査の結果、教訓 3 行、次の候補を追記した。§10.9 は書き換えていない。
 - **v0.29 (2026-10-04)**: §10.9 に変更セット 7 の WP-7a (MitateDB `cell.py` の前半) の実施記録、教訓 3 行、次の候補を追記した。§10.8 は書き換えていない。
 - **v0.28 (2026-10-04)**: §3 の「別件 (対象外)」と §6 に、変更セットが自分で動かした `security/CONTROL_MAPPING.md` の位置参照を同じ変更セットで引き直すことの註を足し (監督裁定 2026-10-04)、§10.8 に R6-4 で残した日付の除去の実施記録と CH-ID の予約を追記した。既存の行は書き換えていない。
@@ -709,3 +710,26 @@
 - §6 の優先 1 の残り: r2db `structured.py` (23 塊 / 344 行)、台帳 R-37 で `cell.py` から出たファイル (`request_traversal`・`delete_confirmation`・`request_limits`・`constraint_resolution`・`provisional_gate`・`request_vocabulary`・`request_binding`・`capabilities_document`)。
 - §6 の優先 2 の先頭 (未着手の module): r2db `platform_declarations.py` (18 塊 / 474 行)、MitateDB `control_plane.py` (27 塊 / 443 行、経緯トークン 149)、MitateDB `platform_declarations.py` (19 塊 / 415 行)、MitateDB `backend.py` (16 塊 / 342 行)。
 - 日付の残り: CH-ID 付きで日付が残る 5 塊 (§10.8) と、検査器が日付だけの除去を拒む形 (入れ子の括弧、` -- ` で割れたラベル、括弧に内容語が残る形)。後者は検査器の許可を広げる変更セット (Class B) を先に置くかを裁定する。
+
+### 10.11 実施記録 (2026-10-05、v0.31 追記)
+
+| 変更セット | 内容 | commit (merge) | 主な結果 |
+|---|---|---|---|
+| 8 | r2db `platform_declarations.py` (対象 32 塊) と MitateDB `control_plane.py` (対象 83 塊)。1 WP (作業指示書 §17、裁定 Y8-1〜Y8-17) | `4ffd5b1` (`47dabd1`) | 115 塊中 26 塊に CH-ID (r2db 8 = CH-0860〜CH-0867、MitateDB 18 = CH-0925〜CH-0945 のうち CH-0930・CH-0941・CH-0943 は欠番)。編集 30 件、文の削除 0。経緯トークン r2db 48 → 30・MitateDB 150 → 118、日付を含む行 13 → 6・5 → 0。登録 515 → 541 ID。変異 29 件がすべて赤 (ほかにレビューの対照変異 1 件)。`--base 56f51b0` = `comment provenance OK: 152 blocks checked`。完了ゲート `5248 passed, 2 subtests passed` (`judge=PASS`、label `cs8b`)、統合時の `tools/tests` `808 passed in 277.94s (0:04:37)`。`security/CONTROL_MAPPING.md` 3.25 (位置参照 56 件の引き直しだけ) |
+
+- **クラウドセッションの下準備**: 実測、作業指示書 §17 の草案、塊ごとの判定表、編集 spec は、クラウドセッションが origin の `092e1a1` で作った (branch `claude/compassionate-allen-tmpnju` の commit `c251d79` の `cloud-out/cs8/`。main には入れていない)。作業機の監督が local main `56f51b0` で取り込み、道具が作業指示書 §16.3 の本文と一致することを diff で確かめ、spec を当て直して検査器と監査スクリプトで再現した。クラウドの照合の出力は受け入れの証拠にせず、変異・両 peer の suite・レビュー・完了ゲートは作業機で行った (Y8-14)。
+- **設計レビュー** (作業指示書 §17、観点 A / B の並列 1 回と再確認 1 回): 変異の対象の誤り (空振り 2、存在しない test 名、c17)、裁定 Y8-12 と実際の除去の食い違い、赤の理由を特定する道具が引き継がれていない、草案の値が裁定の前のまま、ほか。全件を反映した。
+- **コードレビュー** (観点 A / B の並列 1 回と再確認 1 回): 観点 A は CH-ID を付けた 27 塊を全部読み、26 塊は読めると判定した。戻したのは CH-0930 (ラベル `Phase 10 WP-6b (design D-5 (ii) region (iii)): ` と一緒に現行の区分名 `region (iii)` が消える)。監督が着手前に外したのは CH-0941 (残る `region-(ii) classes` がラベルの設計に寄りかかる疑い) と CH-0943 (`security/CONTROL_MAPPING.md` が指すコメント行そのものを変える)。観点 B は記録の誤りだけを挙げた。
+- **作業ノートのプレースホルダ参照** (Y8-17): 対象の塊の中の 5 行のうち 2 件を除いた (r2db L818 の括弧ごと、MitateDB L1885 の path)。r2db L15・L792・L793 は検査器が拒むか文が崩れるので残した。登録 helper の中の 5 行は対象外。
+- **受け入れ監査** (1 回): 着手条件と完了条件 1〜36 は未充足 0・証拠不足 0。基点から spec と `repull.py` を当て直した結果がコミットと sha256 で一致することを確かめた。指摘 1 件 (作業指示書 §17.4 の「検査器が拒んだ除去」の 8 行の検査器の行番号が草案の値のまま) は §17 の末尾の訂正註で直した。
+
+**教訓**:
+- 判定と spec の草案を別の環境 (クラウド) で作り、作業機は取り込み・再現・変異・レビュー・ゲートに絞る分担は成り立った。取り込みでは、道具の本文の一致、対象ファイルの blob の一致、spec を当て直した検査器の出力の 3 つを作業機で確かめる。草案の照合の値は記録に残さず、作業機の値で置き換える。
+- `security/CONTROL_MAPPING.md` が指す行そのもの (コメント行) を編集する塊は、位置参照を手で引き直すより、塊を基準のまま残すほうが単純である。
+- ラベルの中の `region (iii)` のような現行の区分名は内容語である。ラベルを除く前に、その語が同じ module の他の塊や相手 peer で今も使われていないかを grep する。
+
+**次の候補** (§6 の優先順。2026-10-05、main `47dabd1`):
+- §6 の優先 1 の残り: r2db `structured.py`、台帳 R-37 で `cell.py` から出たファイル。
+- §6 の優先 2 (未着手の module、CH-ID の無い 10 行以上の塊の行数順): MitateDB `platform_declarations.py`、MitateDB `backend.py`、MitateDB `credential_store_postgres.py`、r2db `auth.py`。
+- 日付の残りと、検査器が日付だけの除去・作業ノートの参照の除去を受け付けない形 (§10.10 の次の候補と同じ)。
+- CH-ID は CH-0990 から取る (CH-0868〜CH-0924 と CH-0946〜CH-0989 は変更セット 8 の予約の未使用分で欠番)。
