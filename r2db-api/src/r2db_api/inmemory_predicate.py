@@ -74,21 +74,25 @@ def _predicate_text(value: Any, field_type: str | None) -> str:
     formatting unconditionally -- correct for a typed `"number"` column,
     but WRONG for an untyped one, where jsonb's own numeric storage rules
     apply instead and disagree with `float8out` on both trailing zeros and
-    scientific-notation expansion) decides which rule a TOP-LEVEL float
-    uses: `float8out` only when this field is itself a typed `"number"`
+    scientific-notation expansion) decides which rule a TOP-LEVEL float or
+    int uses: `float8out` only when this field is itself a typed `"number"`
     column (matching `PostgresCell._text_expression`'s plain `::text`
     cast); jsonb's own numeric rules for everything else, including an
-    untyped top-level column. A top-level dict/list (`_jsonb_text`) and any
-    NESTED position inside one always use jsonb's own rules regardless of
+    untyped top-level column. An int in a typed `"number"` column is a
+    `double precision` value like any float there, so it takes `float8out`
+    too (`10**15` is `"1e+15"`); an untyped int keeps its own digits. A top-level dict/list
+    (`_jsonb_text`) and any NESTED position inside one always use jsonb's own rules regardless of
     `field_type` -- nesting only exists inside jsonb storage, which has no
     "typed number" concept at all beneath its own root.
+
+    History: CH-1132
     """
     if isinstance(value, str):
         return value
     if isinstance(value, (dict, list)):
         return _jsonb_text(value)
-    if isinstance(value, float) and field_type == "number":
-        return _float8out_text(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and field_type == "number":
+        return _float8out_text(float(value))
     return _jsonb_scalar_text(value)
 
 
