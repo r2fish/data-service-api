@@ -758,3 +758,4 @@
 - §6 の優先 2 (未着手の module): MitateDB `backend.py`、MitateDB `credential_store_postgres.py`、r2db `auth.py`。fingerprint に blob id で入る 4 module (MitateDB `platform_declarations.py`・`config.py`・`main.py`・`control_composition.py`) は、fingerprint の行の追加と同じ変更セットで行うかを先に裁定する。
 - 検査器が受け付けない形 (日付だけの除去、`/`・`=` を含む版数付き括弧の中の WP の位置指定、作業ノートのファイル名だけを残す形) の許可を広げるか。
 - CH-ID は CH-1130 から取る (CH-1040〜CH-1059 は変更セット 9 の予約の未使用分、CH-1060〜CH-1129 は外した MitateDB `platform_declarations.py` のための予約で、どちらも欠番)。
+  - R-123 (2026-10-06) が CH-1130・CH-1131 (r2db `pg_text_format.py` の 2 つの docstring、受け皿 `docs/code-history/r2db-api/pg_text_format.md`) と CH-1132 (r2db `inmemory_predicate.py` の `_predicate_text` の docstring、受け皿 `docs/code-history/r2db-api/inmemory_predicate.md`) を使った。次は CH-1133。
