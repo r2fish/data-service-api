@@ -1,5 +1,5 @@
 """`ControlPlaneService`: the control-plane semantics layer (design v1.2
-R-6/R-7, WP-4).
+R-6/R-7).
 
 Implements the 11 `/control/v1` operations' logic (contract `control_
 endpoints`, `spec/data-service-api.v1.json`) as plain Python methods, tested
@@ -34,6 +34,8 @@ lives HERE, in `ControlPlaneService` -- never in a backend (`InMemory
 ControlBackend`/`PostgresControlBackend` are dumb storage plumbing; they
 never refuse anything ControlPlaneService did not already decide to
 refuse) and never (in WP-5) in the HTTP binding layer.
+
+History: CH-0925
 """
 from __future__ import annotations
 
@@ -93,10 +95,11 @@ _ISSUABLE_ROLES = ("runtime", "developer", "control")
 # remains fail-closed FORBIDDEN for this role, unchanged.
 _AUDIT_ROLE_ALLOWED_OPERATIONS = frozenset({"control_capabilities", "list_applications", "list_credentials", "audit_query"})
 
-# Phase 4 WP-3(b) (design D-5): `audit_query`'s own default/maximum page
+# `audit_query`'s own default/maximum page
 # size -- contract `AuditQueryRequest.limit` bounds the wire value to
 # `[1, 1000]`; `_DEFAULT_AUDIT_QUERY_LIMIT` is what an omitted `limit`
 # defaults to.
+# history: CH-0926
 _DEFAULT_AUDIT_QUERY_LIMIT = 100
 _MAX_AUDIT_QUERY_LIMIT = 1000
 _MAX_AUDIT_QUERY_EVENT_CLASSES = 20
@@ -125,8 +128,8 @@ def _new_secret() -> str:
 
 @dataclass(frozen=True)
 class ControlPlaneLimits:
-    """R-6 numeric constraints (WP-0 M-5; upper bound removed Phase 5 D-3,
-    Q3 案A, WP-4): `applications`/`credentials_per_application`/`control_
+    """R-6 numeric constraints (upper bound removed Phase 5 D-3, Q3 案A):
+    `applications`/`credentials_per_application`/`control_
     requests_per_minute`/`audit_requests_per_minute` must each be a
     positive integer -- **no upper bound is enforced here**, symmetric
     with r2db-api's own `ControlPlaneLimits` (`r2db-api/src/r2db_api/
@@ -145,6 +148,8 @@ class ControlPlaneLimits:
     independently below (also positive-integer only, no upper bound),
     declared for parity with R-6's "request_bytes を最初から宣言する"
     instruction.
+
+    History: CH-0927
     """
 
     applications: int = 100
@@ -360,13 +365,16 @@ class InMemoryCredentialRegistry:
         operation, which authenticates via `_authenticate`/`control_
         credential_state` instead.
 
-        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
-        裁定 1): `secret` is the FULL presented bearer -- this method is
+        Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `secret` is the FULL
+        presented bearer -- this method is
         this registry's own single receiving boundary, splitting via
         `split_bearer_locator` exactly ONCE, HERE, same one-bearer-in
         contract every other store on this peer now uses. A malformed
         bearer returns `None` directly, with no digest comparison at all
-        (mirrors `auth.CredentialStore.peek`'s identical treatment)."""
+        (mirrors `auth.CredentialStore.peek`'s identical treatment).
+
+        History: CH-0928
+        """
         locator = split_bearer_locator(secret)
         if locator is None:
             return None
@@ -875,11 +883,14 @@ class PostgresCredentialRegistry(_PostgresRegistryBase):
         design exemption for store-unreachable audit-write is unrelated to
         this READ probe).
 
-        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
-        裁定 1): `secret` is the FULL presented bearer -- splits via
+        Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `secret` is the FULL
+        presented bearer -- splits via
         `split_bearer_locator` exactly ONCE, HERE, same one-bearer-in
         contract every other store on this peer now uses. A malformed
-        bearer returns `None` directly, no lookup attempted."""
+        bearer returns `None` directly, no lookup attempted.
+
+        History: CH-0929
+        """
         locator = split_bearer_locator(secret)
         if locator is None:
             return None
@@ -981,9 +992,10 @@ class InMemoryControlBackend:
         return self._credentials.count_active_for_application(application_id)
 
     def credentials_active_count_locked(self, application_id: str, work: Any) -> int:
-        # Phase 10 WP-6b: same reasoning as `applications_count_locked`
+        # same reasoning as `applications_count_locked`
         # above -- no real lock to take for a single-process, in-memory
         # backend.
+        # history: CH-0931
         del work
         return self.credentials_active_count(application_id)
 
@@ -1021,7 +1033,7 @@ class InMemoryControlBackend:
         return self._control_credentials.authenticate(secret)
 
     def authenticate_application(self, secret) -> Optional[tuple[str, str, str]]:
-        """Phase 4 WP-3(b) (design D-5): a SEPARATE probe against the
+        """a SEPARATE probe against the
         APPLICATION-credential universe (`self._credentials`, never
         `self._control_credentials`) -- `audit_query`'s own authority check
         needs to recognize "this credential_id/secret genuinely belongs to
@@ -1032,7 +1044,10 @@ class InMemoryControlBackend:
         was never issued against (contract `control_endpoints.audit_query.
         semantics`: "Application credentials are denied"). Returns `None`
         for every failure mode -- never raises for an ordinary auth
-        mismatch."""
+        mismatch.
+
+        History: CH-0932
+        """
         return self._credentials.authenticate(secret)
 
     def append_audit(self, *, work=None, **fields):
@@ -1052,7 +1067,7 @@ class PostgresControlBackend:
         # writer timeouts this connection (the ONE that writes `control_
         # audit`, inside `unit_of_work` below, in the SAME transaction as
         # every control-plane state change) used to carry via `SET
-        # SESSION` (Phase 4 D-6/N-3) are now `mitatedbsvc_controlplane`'s
+        # SESSION` are now `mitatedbsvc_controlplane`'s
         # own PostgreSQL role setting (`ALTER ROLE ... SET`, migration
         # `0007_platform_declarations.sql`) -- applied automatically at
         # login, no client-side action needed. The control-plane
@@ -1061,6 +1076,7 @@ class PostgresControlBackend:
         # and derives `visibility_lag_ms` from the SAME catalog
         # (`platform_declarations.derive_visibility_lag_ms`) instead of
         # this constructor carrying two explicit ms parameters.
+        # history: CH-0933
 
     @property
     def control_credential_store(self):
@@ -1155,10 +1171,13 @@ class PostgresControlBackend:
         return self._control_credentials.authenticate(secret)
 
     def authenticate_application(self, secret) -> Optional[tuple[str, str, str]]:
-        """Phase 4 WP-3(b): identical rationale to `InMemoryControlBackend.
+        """identical rationale to `InMemoryControlBackend.
         authenticate_application` above -- `self._credentials` is the SAME
         `PostgresCredentialRegistry` `issue_credential`/`rotate_credential`/
-        `set_credential_state` already use."""
+        `set_credential_state` already use.
+
+        History: CH-0934
+        """
         return self._credentials.authenticate(secret)
 
     def append_audit(self, *, work, **fields):
@@ -1244,13 +1263,14 @@ class ControlPlaneService:
                  surfaces: Optional[dict] = None, process_ceiling: int = 1,
                  operation_catalog_url: Optional[str] = None) -> None:
         self._backend = backend
-        # Phase 6 WP-3 (design D-2): single source of truth for this
+        # single source of truth for this
         # control-plane process' own `CapabilityDocument.surfaces` --
         # composition-root-injected (`control_composition.
         # build_control_service`'s own `MITATEDB_DATA_BASE_URL`/
         # `_CONTROL_BASE_URL` read), never derived here. `None` (every
         # pre-1.6.0-style direct construction -- most of this
         # repository's own tests) omits the key entirely.
+        # history: CH-0935
         self._surfaces = surfaces
         # The control surface's own `CapabilityDocument` carries the SAME
         # `operation_catalog_url` value the data surface's own document
@@ -1285,7 +1305,7 @@ class ControlPlaneService:
         self._audit_coalescing_window_ms = audit_coalescing_window_ms
         self._audit_rate_lock = threading.Lock()
         self._audit_rate_window: list[float] = []
-        # Phase 10 WP-6b (design D-5 (ii)): the deployer's own declared
+        # the deployer's own declared
         # `process_ceilings.control` (default 1, matching every pre-
         # existing direct construction of this class -- this repository's
         # own tests included -- `limit_enforcement` for `control_
@@ -1294,15 +1314,19 @@ class ControlPlaneService:
         # build_control_service` is the one real caller that passes a
         # value read from the single source `platform_declarations.
         # read_platform_declarations` returns.
+        # history: CH-0936
         self._process_ceiling = process_ceiling
 
     @property
     def limits(self) -> ControlPlaneLimits:
-        """WP-5: a public read accessor for the composition root
+        """a public read accessor for the composition root
         (`control_main.build_control_app`) to size the ASGI request-byte
         bound (`limits.request_bytes`) from the SAME `ControlPlaneLimits`
         instance this service enforces everything else against -- never a
-        second, independently-configured copy of that number."""
+        second, independently-configured copy of that number.
+
+        History: CH-0937
+        """
         return self._limits
 
     # ---- shared machinery -------------------------------------------------
@@ -1388,8 +1412,7 @@ class ControlPlaneService:
             raise StorageConfigurationError("the denial could not be durably recorded") from exc
 
     def _authenticate(self, secret: Optional[str], *, request_id: str) -> ControlPrincipal:
-        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
-        裁定 1): `secret` is the FULL presented bearer -- this peer's own
+        """`secret` is the FULL presented bearer -- this peer's own
         `control_http.py` HTTP boundary passes the `Authorization: Bearer
         <...>` value through UNCHANGED (no pre-split, r2db-api's own
         `control_http.py::_extract_bearer` shape), and every public
@@ -1397,7 +1420,10 @@ class ControlPlaneService:
         `(credential_id, secret_part)` happens exactly once, downstream,
         inside `self._backend.authenticate_control` (`control_auth.
         ControlCredentialStore.authenticate` / `control_credential_store_
-        postgres.PostgresControlCredentialStore.authenticate`)."""
+        postgres.PostgresControlCredentialStore.authenticate`).
+
+        History: CH-0938
+        """
         if secret is None:
             self._deny_audit(event_class="authentication_denial", operation="control_authenticate",
                              target_kind="control_credential", request_id=request_id, reason_code="AUTH_REQUIRED")
@@ -1466,7 +1492,7 @@ class ControlPlaneService:
         pass while `must_rotate` is true. `FORBIDDEN` (WP-0 m-4: C-15
         requires this exact code, not `CAPABILITY_UNSUPPORTED`).
 
-        Phase 3.5 WP-5 (design §4 M-1): a `role="audit"` principal's own
+        a `role="audit"` principal's own
         allow-list while `must_rotate` is true is `control_capabilities`
         ONLY -- self-rotate is deliberately NOT extended to it (in practice
         `_authorize_role` above already forbids `rotate_credential` for an
@@ -1479,7 +1505,10 @@ class ControlPlaneService:
         credential in the same transaction before ever printing a secret, so
         a distributed audit credential's `must_rotate` is already `false` by
         the time anyone can authenticate with it -- an in-band audit
-        principal is never actually stuck behind this gate in practice."""
+        principal is never actually stuck behind this gate in practice.
+
+        History: CH-0939
+        """
         if not principal.must_rotate:
             return
         if operation == "control_capabilities":
@@ -1520,13 +1549,14 @@ class ControlPlaneService:
 
     def _validate_application_id(self, application_id: Any) -> None:
         if not isinstance(application_id, str) or not _APPLICATION_ID_PATTERN.fullmatch(application_id):
-            # 追補 4 O-1: not an identifier the shared `identifiers.py`
+            # not an identifier the shared `identifiers.py`
             # syntax allowlist governs (a control-plane `application_id`
             # has its own, narrower pattern) -- `request_schema`, not
             # `identifier_syntax`. No raw candidate value is echoed
             # (SI-10): only the declared JSON type pair, mirroring
             # `field_types.check_declared_value`'s own convention for a
             # value that fails a declared shape.
+            # history: CH-0940
             raise ValidationError(
                 "application_id must match ^[a-z][a-z0-9_]{0,32}$",
                 details=violation(
@@ -1829,13 +1859,14 @@ class ControlPlaneService:
                 operation="issue_credential", target_kind="credential", outcome="allow", reason_code=None,
                 target_id=new_credential_id,
             )
-        # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        # Phase 6 WP-3 追補 (brief item A):
         # composed HERE, at this in-band issuance point's own response --
         # `control_http.py`'s HTTP boundary now uses this dict verbatim
         # (its own earlier `_with_composed_secret` wrapper is removed),
         # and `ops.py cmd_rotate_credential`'s CLI print path (which calls
         # THIS SAME service method) receives the composed value too, no
         # second composition anywhere downstream.
+        # history: CH-0942
         return {"credential_id": new_credential_id, "application_id": application_id, "role": role,
                 "secret": compose_bearer_locator(new_credential_id, new_secret)}
 
@@ -1882,7 +1913,7 @@ class ControlPlaneService:
         if kind is None:
             raise NotFoundError("credential was not found")
         if state[1]:  # revoked
-            # O-8 (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+            # O-8 (版フリップ監査, ruling
             # 追補4): "対象の状態が操作と矛盾する" refusal (a revoked
             # credential cannot be rotated) is a resource-STATE conflict,
             # not a request-shape/identifier-syntax/deployment-capability
@@ -1892,6 +1923,7 @@ class ControlPlaneService:
             # ValidationError's own vocabulary. `details` is optional for
             # CONFLICT (O-8); `field: credential_id` is kept since one IS
             # attributable.
+            # history: CH-0945
             raise ConflictError("a revoked credential cannot be rotated", details={"field": "credential_id"})
         new_secret = _new_secret()
 
@@ -2192,7 +2224,7 @@ def reset_control_credentials(control_credentials, audit_append, *, work, destru
     credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
     secret = secret or _new_secret()
     control_credentials.revoke_all(work=work)
-    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+    # Phase 6 WP-3 追補 (brief item A):
     # `.issue()` now returns the COMPOSED bearer as its second element
     # (`credential_id`, unchanged, is its first) -- captured here rather
     # than discarded, so this function's own return value (below) is the
@@ -2202,6 +2234,7 @@ def reset_control_credentials(control_credentials, audit_append, *, work, destru
     # a raw secret while `bootstrap`'s identical pattern (which already
     # captured `.issue()`'s return) received a composed one -- exactly
     # the "in-band と帯域外の混在" this WP closes.
+    # history: CH-0944
     credential_id, bearer = control_credentials.issue(must_rotate=True, credential_id=credential_id, secret=secret, work=work)
     audit_append(
         work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,

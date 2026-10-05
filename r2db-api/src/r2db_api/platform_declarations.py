@@ -7,12 +7,12 @@ isomorphism convergence pass, rulings-q4-wp12-rework.md sec.5):
 Reads and validates the platform database's DB-side declarations --
 `r2dbsvc_registry.platform_declarations` (`surfaces`,
 `audit_coalescing_window_ms`, `audit_writer_roles`; migration `0008`;
-`process_ceilings`, Phase 10 WP-6a, migration `0012`) -- and double-checks
+`process_ceilings`, migration `0012`) -- and double-checks
 a writer role's `pg_db_role_setting` timeout catalog entries against that
 SAME connection's own effective `pg_settings` value (D-1(b)).
 
-Reference-implementation module (supervisor ruling 2026-09-05,
-`{scratchpad}/rulings-q4-wp12-rework.md` sec.1): every name, signature and
+Reference-implementation module (`{scratchpad}/rulings-q4-wp12-rework.md`
+sec.1): every name, signature and
 return type below is shared verbatim with MitateDB-api's own same-named
 realization -- peer differences close entirely over the ARGUMENTS a
 caller passes in (`schema`, `ops_module`, `migration`, `names`,
@@ -53,10 +53,12 @@ ROLE` cannot substitute, design D-1(c)) -- `r2db_api.main`/
 sink's pool (`PostgresApplicationAuditSink.borrow_connection`/
 `PostgresControlAuditSink.borrow_connection`).
 
-Peer-local, independently maintained (no cross-peer sharing, requester
-ruling 2026-09-03) -- this module's read/validate/derive/check helpers are
+Peer-local, independently maintained (no cross-peer sharing) -- this module's
+read/validate/derive/check helpers are
 pinned isomorphic to MitateDB-api's own same-named realizations by
 `_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`).
+
+History: CH-0860
 """
 from __future__ import annotations
 
@@ -73,8 +75,8 @@ from .structured import IDENTIFIER as _PG_IDENTIFIER_PATTERN
 from .structured import MAX_IDENTIFIER_LENGTH as _PG_IDENTIFIER_MAX_LENGTH
 
 #: This peer's own module path, named in every fail-fast message's "next
-#: ops command" (design §3.8). Peer-local (no cross-peer sharing, requester
-#: ruling 2026-09-03).
+#: ops command" (design §3.8). Peer-local (no cross-peer sharing).
+# history: CH-0861
 PEER_MODULE = "r2db_api"
 
 #: Default registry schema this table lives in (D-2(a)) -- overridable by
@@ -418,7 +420,7 @@ def validate_audit_writer_roles_value(value: object, *, schema: str, ops_module:
 
 
 # ---------------------------------------------------------------------------
-# F-15 (Phase 10 WP-6a, design D-5(ii)): the `process_ceilings` row -- one
+# F-15 (design D-5(ii)): the `process_ceilings` row -- one
 # combined check for "does the row exist and is it well-formed", the SAME
 # treatment work order WP-6a's own §3 D-5(ii) reading calls for ("verify-
 # declarations に足す番号は F-15" -- singular, unlike surfaces'
@@ -430,6 +432,7 @@ def validate_audit_writer_roles_value(value: object, *, schema: str, ops_module:
 # `code="F-15"` so `ops verify-declarations` (`_VERIFY_DECLARATIONS_EXIT_
 # CODES`) needs exactly one new exit code, not two.
 # ---------------------------------------------------------------------------
+# history: CH-0862
 
 
 def _f15_missing_message(schema: str, *, ops_module: str) -> str:
@@ -687,9 +690,12 @@ def _role_setting_rows(conn: "psycopg.Connection", role_name: str) -> list[tuple
     design §1.5 finding 6) or scoped to THIS connection's own database
     (`setdatabase = <this db's oid>`, F-11's own per-database override) --
     the catalog query itself is restricted to `setdatabase IN (0, own db
-    oid)` (design D-1(c) amendment 2026-09-05), never every database on
+    oid)` (design D-1(c) amendment), never every database on
     the cluster. `pg_db_role_setting` is a world-readable shared catalog:
-    any connection can run this query regardless of its own login role."""
+    any connection can run this query regardless of its own login role.
+
+    History: CH-0863
+    """
     statement = sql.SQL(
         "SELECT s.setdatabase, d.datname, s.setconfig FROM pg_db_role_setting s "
         "JOIN pg_roles r ON r.oid = s.setrole LEFT JOIN pg_database d ON d.oid = s.setdatabase "
@@ -815,7 +821,7 @@ def check_writer_role_timeouts(
 #   (a) the SERVED capabilities document (the caller's own `capabilities()`
 #       call, never rebuilt here) actually declares `constraint_
 #       declarations`/`dry_run`/`idempotency`/`request_budget` `enabled`.
-#   (b) M-7 (`{scratchpad}/audit-wp2e-2.md` R-7): the SAME served
+#   (b) M-7: the SAME served
 #       capabilities document's own `limits` block (never a fresh
 #       `ResourceLimits()` constructed here -- that residual flaw, caught
 #       by the closure audit, was the same "unreachable through a real
@@ -833,6 +839,7 @@ def check_writer_role_timeouts(
 #       application's own traffic, regardless of what the platform-wide
 #       capability document says -- so this fails closed per-application,
 #       not just once for the whole platform.
+# history: CH-0867
 def check_contract_170_declarations(
     capabilities_document: Mapping[str, Any],
     applied_upgrade_numbers_by_application: Mapping[str, Optional[frozenset[int]]],
@@ -907,8 +914,8 @@ _CONTRACT_170_LIMIT_CLASSES: tuple[str, ...] = ("enum_members", "idempotency_ent
 
 
 # ---------------------------------------------------------------------------
-# F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09, following the WP-4e
-# conformance investigation's own finding -- see that WP's report): every
+# F-16 (following the WP-4e conformance investigation's own finding -- see
+# that WP's report): every
 # PostgreSQL role this deployment's own processes pool connections against
 # must have a `CONNECTION LIMIT` (`pg_roles.rolconnlimit`) of `-1`
 # (unlimited) or at least that role's own worst-case simultaneous
@@ -950,6 +957,7 @@ _CONTRACT_170_LIMIT_CLASSES: tuple[str, ...] = ("enum_members", "idempotency_ent
 # plane role classes below at once (measured 2026-09-10, WP-4 integration
 # review M-1).
 # ---------------------------------------------------------------------------
+# history: CH-0864
 
 #: `r2db_api.main`'s own `credentials` + `durable_audit` stores, both
 #: pool-sized to `role_pool_size(thread_limit)` (unless
@@ -1044,7 +1052,7 @@ def check_role_connection_limits(
     deployment that has genuinely raised its real pool size is checked
     against ITS OWN real floor, not a silently-stale code-level default.
 
-    design D-3 (5): `role_pool_size(thread_limit)`
+    `role_pool_size(thread_limit)`
     sizes ONE process' own pool; `pg_roles.rolconnlimit` is a
     CLUSTER-WIDE cap shared by every one of `process_ceilings.<plane>`
     processes that pools a connection against that role, each with its
@@ -1063,14 +1071,14 @@ def check_role_connection_limits(
     the platform-plane `<...>_api`/`<...>_controlplane`/`<...>_
     auditreader` roles (module-level floor constants above) and every
     REGISTERED application's own runtime/developer roles (floor =
-    `pool_size * process_ceilings.data`, one store each, Phase 10 WP-8a).
+    `pool_size * process_ceilings.data`, one store each).
     A role with no grants matching any of the three platform-plane shapes
     above (identity unknown to this check) is silently skipped, never
     flagged -- this check only ever verifies roles it can positively
     identify, exactly like every other read in this module never guesses
     at what it cannot observe.
 
-    Phase 10 WP-4g (supervisor ruling 2026-09-09): `role_classes`/
+    Phase 10 WP-4g: `role_classes`/
     `application_slugs` let a caller narrow this check to exactly the
     role(s) ITS OWN process pools connections against, instead of every
     role this whole platform has -- `ops verify-declarations`'s own
@@ -1086,11 +1094,14 @@ def check_role_connection_limits(
     developer role check to exactly the named slugs -- an EMPTY sequence
     means "check no application role at all" (`control_main`'s own case:
     that process serves no application); `None` (the default) means every
-    registered application, unchanged pre-existing behavior."""
+    registered application, unchanged pre-existing behavior.
+
+    History: CH-0865
+    """
     if role_classes is None:
         role_classes = _ROLE_CLASSES
     floors: dict[str, int] = {}
-    # M-1 (WP-4 integration review 2026-09-10): a role can legitimately
+    # M-1 (WP-4 integration review): a role can legitimately
     # match MORE than one platform-plane class below (a role granted
     # INSERT on both audit tables, or INSERT on one and SELECT on both,
     # for example) -- `max(...)` keeps the STRICTEST floor that role is
@@ -1099,6 +1110,7 @@ def check_role_connection_limits(
     # (`r2dbsvc_control`, never a real pooled role -- see the module
     # header above) from being misidentified as matching all three via
     # its implicit owner ACL.
+    # history: CH-0866
     application_audit_owner = _table_owner(conn, schema, "application_audit")
     control_audit_owner = _table_owner(conn, schema, "control_audit")
     if "api" in role_classes:
