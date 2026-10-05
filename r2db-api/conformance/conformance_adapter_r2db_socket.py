@@ -141,7 +141,7 @@ class _AppDispatch:
     v1/capabilities` -- real, unauthenticated GET requests. Measured
     (this WP): `r2db_api.control_plane.ControlPlaneService.capabilities`
     calls `self._check_rate()` BEFORE `self._authenticate(...)`
-    (`r2db-api/src/r2db_api/control_plane.py:691-693`) -- so EVERY one of
+    (`r2db-api/src/r2db_api/control_plane.py::ControlPlaneService.capabilities`) -- so EVERY one of
     those readiness-poll GETs against `/control/v1/capabilities` consumes
     one unit of the control plane's own GLOBAL, pre-auth `control_
     requests_per_minute` window, the SAME window every ordinary
@@ -580,8 +580,8 @@ class R2DBSocketConformanceAdapter(R2DBHttpConformanceAdapter):
 
         Role is inferred from identity against `self._app`/`self._control_
         app`, both of which the inherited call sites always assign BEFORE
-        calling `self._build_client(...)` for them (`__init__:1118-1120`,
-        `:1186-1187`, `_privileged_control_send`'s own rebuild): matching
+        calling `self._build_client(...)` for them (`__init__`'s own call sites and
+        `_privileged_control_send`'s own rebuild): matching
         `self._app` reuses (or, on a control-plane rebuild, in-place
         RE-DISPATCHES -- WP-4c item 4: no restart, see `_AppDispatch`'s own
         docstring) the ONE data surface this instance holds (`self.

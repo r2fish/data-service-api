@@ -33,7 +33,7 @@ work order 完了条件 → 変異 14 の但し書き)**: `result_items` applies
 accepted, never refused as inapplicable) but is NOT driven at its own
 N/N+1 boundary by this row -- MitateDB's own `result_items` refusal is
 keyed to the requested page `limit` rather than the row count actually
-returned (`MitateDB-api/src/mitatedb_api/cell.py:834-837`), which does not
+returned (`MitateDB-api/src/mitatedb_api/cell.py::ApplicationCell.read_page`), which does not
 compose into one recipe both peers satisfy the same way. `batch_items`
 alone carries this row's own non-vacuity requirement (L8-15: an adapter
 that silently drops `budget` turns vector (1) red on every plug).

@@ -116,14 +116,14 @@ server) also needs `PGHOST`/`PGPORT`; these tests fail loudly, never skip, when 
   no endpoint of their own to deny uniformly and are refused in their own,
   different forms: `best_effort_transactions` is a present denial of the
   *request-parameter value* `transaction: "best_effort"` on
-  `POST /v1/data/{entity}/mutations` (`http.py:1004-1010`); the
+  `POST /v1/data/{entity}/mutations` (`http.py::post_mutate`); the
   cross-entity `POST /v1/data/mutations` batch has no `transaction` field
-  to refuse at all (`http.py:1137`). `revision_preconditions` is a present
+  to refuse at all (`http.py::post_cross_entity_mutate`). `revision_preconditions` is a present
   denial of the `expected_revision` parameter `transact()` accepts on
-  either mutation entry point (`conformance-tests/CONDITIONS.md:47`, C-18).
+  either mutation entry point (`conformance-tests/CONDITIONS.md`'s C-18 row).
   `row_addressability` has no call surface at all on the in-process
-  adapter -- `SurfaceAbsent` (`conformance-tests/CONDITIONS.md:46`, C-17
-  form (a)). (`audit_query` is
+  adapter -- `SurfaceAbsent` (`conformance-tests/CONDITIONS.md`'s C-17
+  row, form (a)). (`audit_query` is
   `unavailable` **on this host**: since phase 4 WP-3(b) it is `enabled` on
   the control service, which is a different deployment unit making a
   different, equally true statement about itself -- see the audit note under
@@ -241,8 +241,8 @@ real-instance verification procedure).
   within `structured_query`), `create_index`/`drop_index`/`drop_entity`/
   `jobs` (`unsupported` within `schema_operations`), `row_addressability`,
   `revision_preconditions`, and `best_effort_transactions` stay
-  `unavailable`/`unsupported`. **`idempotency` (Phase 9 WP-3c, `cell.py:3887`)
-  and `application_catalog` (Phase 6 WP-3, `cell.py:3860`) no longer belong
+  `unavailable`/`unsupported`. **`idempotency` (Phase 9 WP-3c, `capabilities_document.py::build_capabilities_document`)
+  and `application_catalog` (Phase 6 WP-3, `capabilities_document.py::build_capabilities_document`) no longer belong
   on this list**: both are `enabled`. **`cross_entity_mutation` no
   longer belongs on this list**: the requester approved phase 3.5
   (2026-08-31) and it shipped as `partial` in WP-2/WP-3 -- see the "What
@@ -253,20 +253,32 @@ real-instance verification procedure).
   that host does not serve it), see the audit note at the end of this
   section and `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md`.
 - **Application-plane resource bounds** (Phase 8 WP-1a, rework 1,
-  2026-09-06): `requests_per_minute` and `concurrency` are `enforced` --
-  `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:744`,
-  `:775-782`, `:785-794`), declared in `limit_enforcement`
-  (`cell.py:4051`, `:4055`); `execution_ms` is declared
-  `reference_wall_clock`, not `enforced` (`cell.py:4044`) -- a wall-clock
+  2026-09-06): `requests_per_minute` and `concurrency` are bounded by
+  `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py::_LimitStateHolder`)
+  and declared in `limit_enforcement` as `enforced` while the declared
+  process ceiling is 1 or the bound is held by a mechanism shared across
+  every worker (the PostgreSQL-backed rate row for `requests_per_minute`,
+  the host-shared slot directory for `concurrency` with this supervisor's
+  own worker count at least the declared ceiling), and as
+  `deployment_required` otherwise (`capabilities_document.py::resolve_limit_enforcement`,
+  called from `capabilities_document.py::build_capabilities_document`);
+  `execution_ms` is declared
+  `reference_wall_clock`, not `enforced` (`capabilities_document.py::build_capabilities_document`) -- a wall-clock
   deadline (`time.monotonic() + max_execution_ms`) handed to the backend,
   `backend_postgres.py` converts it into a real `SET LOCAL
-  statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`),
+  statement_timeout`/`lock_timeout` (`backend_postgres.py::PostgresBackend._set_timeouts`),
   matching r2db-api's own identical declaration. Cloud Run's own
   concurrency/timeout settings remain a separate, undeclared
   deployment-layer control on top of the above -- the contract's
   `limit_enforcement` enum has a `deployment_required` member for exactly
-  this kind of control (`contract/data-service-api.v1.json:198,1201`), but
-  it appears nowhere in either peer's own declaration code.
+  this kind of control (`limit_enforcement` in `spec/data-service-api.v1.json`),
+  and this peer's own declaration code does emit it:
+  `capabilities_document.py::resolve_limit_enforcement` returns
+  `deployment_required` instead of `enforced` for a class bound only by
+  in-process state once the declared process ceiling is above 1 (the data
+  plane's `concurrency` and `requests_per_minute` unless the host-shared
+  mechanism is wired, and the control plane's two request-rate classes
+  through `control_plane.py::ControlPlaneService.control_capabilities`).
 - **RLS defence-in-depth**, **IAM DB authentication/Cloud SQL Connector**,
   and a **shared/cross-instance control-plane rate window** (needed only
   if the control service ever runs with more than one instance) are all

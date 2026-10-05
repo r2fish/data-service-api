@@ -112,7 +112,7 @@ def test_visible_field_domains_excludes_the_row_order_column_on_sqlite() -> None
 
 def test_declaring_the_row_order_column_name_as_a_field_is_rejected_by_identifier_syntax() -> None:
     """完了条件 8: `_mdb_row` を field として宣言する要求が識別子の構文
-    (`identifiers.py`:19 の `^[a-z][a-z0-9_]{0,62}$`, 先頭 `_` を拒む) で
+    (`identifiers.py::_IDENTIFIER` の `^[a-z][a-z0-9_]{0,62}$`, 先頭 `_` を拒む) で
     拒否される -- 追加の専用拒否経路は無い (design D-2 の add_field 行)。
     `add_field` 経由で確認する (design が名指す call site)。"""
     cell = ApplicationCell("app1", backend=SQLiteBackend())

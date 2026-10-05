@@ -148,7 +148,7 @@ def test_build_app_rejects_every_removed_env_var_through_the_real_composition_ro
     23(a)): `reject_removed_timeout_env`/`reject_removed_surface_env`
     were exercised ONLY as bare function calls in `test_platform_
     declarations.py` -- never through `build_app` itself. Removing
-    `main.py`'s own two calls to those functions (`main.py:257-258`)
+    `main.py`'s own two calls to those functions (in `main.py::build_app`)
     left every PRE-EXISTING test in this file green, since none of them
     ever set one of the four removed env vars at all. 8 cases: {the 2
     removed timeout vars, the 2 removed surface vars} x {empty string,
@@ -850,7 +850,7 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
 def test_build_app_wires_the_preauth_concurrency_slot(main_module, platform) -> None:
     """Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09, review
     round 2): `build_app` must wire `HttpService`'s own `limit_holder`/
-    `max_concurrency` (`main.py`'s own `HttpService(...)` call, `:474`)
+    `max_concurrency` (`main.py::build_app`'s own `HttpService(...)` call)
     onto the SAME `_LimitStateHolder` every served `ApplicationCell`
     shares, and this deployment's own real declared `max_concurrency` --
     not merely SOME non-`None` values `HttpService.__init__`'s own
@@ -1281,7 +1281,7 @@ _MITATEDB_FORBIDDEN_CONTROL_CREDENTIAL_IDENTIFIERS = frozenset(
 # (`auth.py`/`credential_store.py`), so r2db-api's own module-name check
 # covers only `control_plane`. `control_composition` is DELIBERATELY
 # EXCLUDED here even though it is control-plane-only machinery: `main.py`
-# legitimately imports `build_control_service` from it (`main.py:398`,
+# legitimately imports `build_control_service` from it (`main.py`'s module-level import,
 # kept for `test_main.py`'s own pre-existing call sites) -- checking that
 # module name would false-positive on real, required code. The class-name
 # check above still catches anything control-credential-shaped reached
@@ -1355,11 +1355,11 @@ def test_data_plane_composition_root_does_not_import_the_control_credential_stor
     """D-5's own "壊れるシナリオ" (i), applied to this peer: the
     application-plane composition root must never gain a reference to the
     control-credential universe -- `ControlCredentialStore` (in-memory,
-    `control_auth.py:99`), `PostgresControlCredentialStore` (`control_
-    credential_store_postgres.py:65`), or `ControlPlaneService` (`control_
+    `control_auth.py::ControlCredentialStore`), `PostgresControlCredentialStore` (`control_
+    credential_store_postgres.py::PostgresControlCredentialStore`), or `ControlPlaneService` (`control_
     plane.py`). Reads the SOURCE FILE directly (never `import mitatedb_api.
     main` -- that module ends with a module-level `app = build_app()`
-    (`main.py:400`) that reads `os.environ` at import time), then
+    (`main.py::app`) that reads `os.environ` at import time), then
     `ast.parse`s it (never regex/substring, review fix M4 -- see
     `_control_credential_vocabulary_hits`'s own docstring for why this is
     strictly stronger, including why THIS peer's own documented

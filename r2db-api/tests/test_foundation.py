@@ -501,9 +501,8 @@ def test_r2_capability_artifact_matches_real_capabilities_response(service):
         if name in ("ordering", "cursor_pagination"):
             # Neither `order_by` nor cursor pagination is a capability name
             # of its own in the common contract -- both are query-shape
-            # features gated by `structured_query` alone (service.py's own
-            # capabilities() comment: "structured_query: enabled (order_by
-            # / pagination が実行可能になったため)").
+            # features gated by `structured_query` alone (`structured_query` is
+            # `enabled` in `capabilities_document.py::build_capabilities_document`).
             return capabilities["structured_query"]["status"] == "enabled"
         if name.startswith("schema."):
             operation = name.split(".", 1)[1]
@@ -614,7 +613,7 @@ def test_schema_request_spent_before_its_operation_leaves_no_entity():
 
 def test_delete_rejects_truthy_non_boolean_destructive_before_confirmation(service):
     """Review blocker B-1 (data plane -- `bind_mutation`'s pre-existing
-    `isinstance(bool)` check, structured.py:229, newly locked down by a
+    `isinstance(bool)` check, `mutation_binding.py::bind_mutation`, newly locked down by a
     real test): a truthy-but-non-boolean `destructive` (the string
     `"true"`) must be rejected as `VALIDATION_FAILED` -- never silently
     coerced by a loose `bool(...)` cast into a real destructive delete.
@@ -883,7 +882,7 @@ def test_require_destructive_confirmation_needs_destructive_true_and_the_exact_p
 
 def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded(service):
     """Opus review minor m-3: a bidirectional test for the Q1-D8
-    reclassification (structured.py:212) -- this was not actually covered
+    reclassification (`mutation_binding.py::bind_mutation`'s `len(raw_values) > 100` branch) -- this was not actually covered
     by any existing test before this review round. A `Mutation.values`
     exceeding the contract's own fixed `maxProperties: 100` shape bound is
     `VALIDATION_FAILED` (400), never `LIMIT_EXCEEDED` (a deployment-tunable
@@ -910,7 +909,7 @@ def test_every_advertised_resource_limit_has_a_deterministic_boundary():
     assert error.value.code == "LIMIT_EXCEEDED"
     # Opus review M-1(b): a representative behavioral (runtime) assertion of
     # `limit_class` on a real response -- this one exercises `ResourceLimits.
-    # check`'s own dynamic `kind`-as-limit_class call site (limits.py:35),
+    # check`'s own dynamic `kind`-as-limit_class call site (`limits.py::ResourceLimits.check`),
     # the one non-literal case `test_limit_class_vocabulary.py`'s static
     # scan allowlists by name.
     assert error.value.details["limit_class"] == "batch_items"
@@ -1277,7 +1276,7 @@ def test_create_entity_field_types_value_outside_the_seven_word_vocabulary_is_va
 @pytest.mark.parametrize("bad_value", ["unknown", ["string"], {"x": 1}, 1, None, True])
 def test_add_field_field_type_value_outside_the_seven_word_vocabulary_is_validation_failed(bad_value):
     """Coordinator F2: the identical isinstance-first guard on `add_field`'s
-    scalar `field_type` (`structured.py:702`'s sibling to the create_entity
+    scalar `field_type` (`structured.py::bind_schema_operation`'s add_field sibling to the create_entity
     fix above) -- a pre-existing (not a WP-2 regression) hole the review
     named as closeable in the same fix."""
     cell = _cell()

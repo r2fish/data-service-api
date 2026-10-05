@@ -81,6 +81,22 @@ through the completion gate is recorded here and not filed in the ledger):
        why: the verdict is the subprocess's exit code, nothing more.
        caught by: the reviewer reading that mutation's own log under
        $SP/dev-logs/ (accepted).
+    3. not detected: a gate.py run in flight while an entry whose `tests`
+       all live under `tools/tests/` is mutated -- the mutation is written
+       to its target file (which may be a suite file under `tests/` or
+       `conformance-tests/`, e.g. a guard's injected `# see cell.py:12`),
+       the pytest runs, and the file is restored, all while the gate is
+       measuring the same worktree.
+       why: the suite lock is taken by the root `conftest.py`
+       (`dsa_testpg.ensure_for_pytest()`); `tools/tests/` has its own
+       root (`tools/tests/pytest.ini`, no conftest.py), so neither this
+       tool nor that pytest ever asks for the lock, and `--wait` has
+       nothing to wait on.
+       caught by: the supervisor not ordering a tools/tests mutation run
+       while a gate measures the same worktree (OPERATING_CONDITIONS
+       1.3-20a), and the restore's own sha256 x2 check; a collection that
+       already happened before the mutation is not affected by a comment
+       injected afterwards (observed 2026-10-05, R-39 change set 2).
 """
 from __future__ import annotations
 

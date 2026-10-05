@@ -252,7 +252,178 @@ worktree `.claude/worktrees/r39-refs` (main から)。WP は 1 本 (実装担当
 
 対応の無い行が無いことを最後の完了条件とする (C2-6)。
 
+**訂正註 (2026-10-05、CS-2 実装、本文は書き換えない)**: 実装で触ったパスが §9.2 より増えた。`MitateDB-api/tests/test_ops_apply_platform_migration.py`、`tools/dev/README.md` (Known gaps 一覧に新ガードの行を足す)、`conformance-tests/test_conformance_docstring_position_refs.py` (R-95 の床を実測へ下げ、実コーパスの行またぎ pin を合成 fixture のテストに置き換えた)、R-95 作業指示書 (`docs/work-orders/WORK_ORDER_R95_CONFORMANCE_DOCSTRING_POSITION_REFS_V1.md`、床の経緯を訂正註に書いた) を加える。§9.3 C2-5 の正規表現は、`.py:NNNN` の 1 形から、`.py`/`.md`/`.json` + 改行・`#` の形、backtick 付きの bare `` `:N` ``、`[Ll]ines? N`、拡張子の無い `name:NNN` (`[A-Za-z_]` 始まり)、4 桁 label `NNNN:N`、`~:N` の 6 形に広がり、host:port 形 (名前が `.invalid` で終わるか `localhost`) を除外する。最終形は実装 `tools/tests/test_no_line_number_position_refs.py` の docstring を正とする。allowlist は 45 entry・48 件 (記録 27 entry・30 件、位置参照でないもの 18 entry・18 件) になった。監督裁定 Y-7〜Y-18 は監督の裁定記録にあり、引き継ぎ書に転記する。 監督は同じ変更セットで `tools/dev/mutate.py` の module docstring に Known gaps 3 (tools/tests だけを対象にする entry は suite lock を取らない) と `tools/dev/README.md` の索引行を足した (監督裁定 Y-19)。
+
 ## 10. 記録 (統合時に監督が埋める)
 
-- CS-1: (未実施)
-- CS-2: (未実施)
+### 10.1 変更セット 1 (2026-10-05、監督)
+- commit `d220c15`、merge `3042774` (main)。新規テスト 10 本 (r2db 6、MitateDB 4)、既存テストと `src/` の変更 0。
+- `pt: 28 passed in 6.18s` (10 ファイル一括、log=dev-logs/pt 20261005-202511.log)。差し戻し後 `pt: 6 passed in 0.48s` (3 ファイル、log=dev-logs/pt 20261005-203524.log)。
+- `mutate: 28 mutations, 28 as expected, restores verified 10/10 files (sha256 x2), grep counts unchanged (n/a for 8 edits whose lines all exist in the pristine file) | logs=dev-logs/mutate 20261005-202059`。レビューが足した変異: `mutate: 2 mutations, 2 as expected, restores verified 2/2 files (sha256 x2)` (C1-3a の未知型の枝、C1-2c の desc 比較)。
+- コードレビュー (Class B、1 起動): 指摘 4 件 (重大度 低。1〜3 は docstring / literal 表記で同じ変更セットで直した、4 は指示書の C1-10c の例の食い違い → §3 の訂正註)。
+- 完了ゲート: `gate: 5276 passed, 2 subtests passed in 2634.21s (0:43:54)`、`judge=PASS`、`pg_database/pg_roles diff 0`、label r39-cs1。負荷 (他プロジェクトの vitest と fseventsd、load average 50〜100) 下で 1 回目は背景の 30 分上限で止まり、2 回目で完走。`COLLECTION_FLOOR` 5248 → 5276。
+- 台帳 v1.180。R-123・R-124 起票、R-22 行へ `src/` 側の引き渡しを【追記】。
+
+### 10.2 変更セット 2 (2026-10-05、監督)
+- 本変更セットの commit (worktree r39-refs、main `3042774` を merge 済み。hash は merge commit と台帳 v1.181 の次の版数行に残る)。差分 47 ファイル (`tools/dev/mutate.py` の Known gaps 3 を含む) (conformance-tests、両 peer の tests / conformance adapter、MitateDB README、`tools/dev/README.md`、R-95 作業指示書の訂正註、本書 §10) + 新規 `tools/tests/test_no_line_number_position_refs.py`。`src/` 0 件。文字列定数を空にした AST は R-95 の検査 1 ファイル以外 HEAD と一致 (assert・期待値の変更 0)。
+- 置換: 「現在の所在の主張」の行番号形 (`module.py:NNNN`、`` `module.py`:N ``、`.md:N`、backtick 付き bare `` `:N` ``、「line(s) NNN」語形、検出形に掛からない 3 件) 最終の検出形で数えると 206 → 48 (除去 158 件。作業指示書原文の `\.py:[0-9]+` では 120 → 29、除去 91 件。実装報告の段階集計 138 は検出形が段階ごとに広がったため逐語には再現しない — 受け入れ監査の指摘) を行番号に依らない形 (`file.py::symbol`、テスト名、`CONDITIONS.md` の C-NN 行、spec の JSON path、設計文書の段落名、作業指示書の完了条件番号) へ。うち腐っていたもの: reader の分類表の全件に加え、c32 の `:639`/`:581`、c04 spec の `:1042`/`:218`、r2db `http.py:355`、bare の `:1308`/`:1672`/`:1496`/`:971`/`:1273`/`:474`、`~:2028`/`~:1260`、`C-14:476`。時点の記録 27 entry・30 件と not-a-ref 18 entry・18 件 (fixture 文字列・期待メッセージ) を allowlist に逐語で固定 (計 45 entry・48 件、件数も固定)。
+- ガードの検出形: `.py`/`.md`/`.json` の後ろに backtick 任意・`:`・空白/改行/`#` を挟んだ数字、backtick 付き bare `` `:N` ``、「line(s) NNN」語形、拡張子の無い英字始まりの名前 (`C-14:476`、`test_c12:135`) に直接付く `:N`、4 桁 label (`0013:91`)、`~:N`。host:port 形 (`.invalid` で終わる名前、`localhost`) は位置参照と見なさない (Y-17)。Known gaps: backtick 無しで直前の path を継ぐ bare `:N`、`L<数字>` (L1 語彙と衝突)、数字始まりで 4 桁 label でない名前、`.py`/`.md`/`.json` 以外で改行や backtick を挟む形、symbol の現存、除外 4 件 (`CONDITIONS.md`、`CONDITIONS_HISTORY.md`、`conformance-tests/README.md`、R-95 の検査自身)。
+- pt.py: ガード + R-95 `pt: 31 passed in 8.66s` (log=dev-logs/pt 20261005-230530.log)、ガード単独 (最終) `pt: 6 passed in 1.04s` (log=dev-logs/pt 20261005-231302.log)、conformance-tests (c05 c07 c12) `pt: 134 passed in 48.15s` (log=dev-logs/pt 20261005-231026.log)、r2db tests `63 passed`、MitateDB tests `69 passed`、conformance-tests (c22 c12 test_contract socket_harness) `pt: 147 passed in 50.40s` (log=dev-logs/pt 20261005-225154.log)。先の回: conformance-tests 10 ファイル (4 plug) `322 passed`、r2db tests 5 ファイル `444 passed`、MitateDB tests 10 ファイル `427 passed`。`test_conditions_register.py` は comment だけの変更で、collection 全体を要する検査のため完了ゲートで確認。
+- mutate.py: ガード `mutate: 10 mutations, 10 as expected, restores verified 2/2 files (sha256 x2), grep counts unchanged` (M2-2 allowlist から 1 件除去 / M2-2b 存在しない entry 追加 / M2-5 `cell.py:12` / M2-5b `` `cell.py`:12 `` / M2-5c `CONDITIONS.md: 47` / M2-5d `` `:12` `` / M2-5e `line 12` / M2-5f `C-14:476` / M2-5g `~:12` / M2-5h `__init__:12`、log=dev-logs/mutate 20261005-232256)。R-95 `mutate: 29 mutations, 29 as expected, restores verified 2/2 files (sha256 x2)` (M0 green、28 red、M14 は床 +1。log=dev-logs/mutate 20261005-224612)。
+- R-95 の床: SHAPE_A 22 → 4 → 2、SHAPE_B 2 → 0、SHAPE_C 15 → 12 → 10 → 2、ROUTE_I 22 → 12 → 10 → 2、ROUTE_III 17 → 9 → 2 (SCAN_FILES 47、SCAN_UNITS 1420 は変えず。実測 61 / 1833)。行またぎの pin は合成 fixture `test_fixture_line_wrapped_position_reference_is_joined_and_resolved` に (監督裁定 Y-9)。R-95 作業指示書に訂正註。
+- コードレビュー (Class C): 1 巡目 5 件 (中 1、低 3、観察 1) → Y-12〜Y-14 で直す/観察。再確認 1 回目 3 件 (中 1、低 2) + 観察 → Y-15 で直す。再確認 2 回目 1 件 (低。拡張子の無い `name:NNN`、`~:N`、`L<数字>`。3 件が腐っていた) + 観察 → Y-16・Y-17 で直す。再確認 3 回目 1 件 (低。`_` 始まりの名前と大文字 `Line`) → Y-18 で直す (走査対象で増える一致 0)
+- 受け入れ監査 (Class C、1 起動): C2-1 / C2-2 / C2-5 / C2-6 と受入 2〜5 充足、C2-3 / C2-4 は内容充足で記録 (本節) を要した、C2-1 の件数 138 は証拠不足 (上の再計数で置き換えた)、受入 1 は最終形で 2 ファイル同時に再実行 `pt: 31 passed in 3.32s` (log=dev-logs/pt 20261005-233907.log)。観察なし。設計疑義 (床 2 が記録 2 件に依存) は監督裁定 Y-20 で観察。
+- 完了ゲート: `gate: 5276 passed, 2 subtests passed in 753.62s (0:12:33)`、`judge=PASS`、`pg_database/pg_roles diff 0`、label r39-cs2 (3 回目。1・2 回目は差し戻しのため監督が止めた)。収集数は CS-1 後の 5276 のまま (R-95 の pin 1 本を fixture 1 本に置き換えたため増減 0)。ゲート開始 (23:14) 後の 23:22 に tools/tests 対象の mutate.py が測定中の worktree へ変異を書いて復元した件は監督裁定 Y-19 (`tools/dev/mutate.py` Known gaps 3、起票しない)
+
+- C2-3 / C2-4 の新しい文 (逐語。`git diff -U0` の追加行。行頭の `+` は diff の印):
+
+```diff
+diff --git a/MitateDB-api/README.md b/MitateDB-api/README.md
+index 0c8622b..d9f7855 100644
+--- a/MitateDB-api/README.md
++++ b/MitateDB-api/README.md
+@@ -119 +119 @@ server) also needs `PGHOST`/`PGPORT`; these tests fail loudly, never skip, when
+-  `POST /v1/data/{entity}/mutations` (`http.py:1004-1010`); the
++  `POST /v1/data/{entity}/mutations` (`http.py::post_mutate`); the
+@@ -121 +121 @@ server) also needs `PGHOST`/`PGPORT`; these tests fail loudly, never skip, when
+-  to refuse at all (`http.py:1137`). `revision_preconditions` is a present
++  to refuse at all (`http.py::post_cross_entity_mutate`). `revision_preconditions` is a present
+@@ -123 +123 @@ server) also needs `PGHOST`/`PGPORT`; these tests fail loudly, never skip, when
+-  either mutation entry point (`conformance-tests/CONDITIONS.md:47`, C-18).
++  either mutation entry point (`conformance-tests/CONDITIONS.md`'s C-18 row).
+@@ -125,2 +125,2 @@ server) also needs `PGHOST`/`PGPORT`; these tests fail loudly, never skip, when
+-  adapter -- `SurfaceAbsent` (`conformance-tests/CONDITIONS.md:46`, C-17
+-  form (a)). (`audit_query` is
++  adapter -- `SurfaceAbsent` (`conformance-tests/CONDITIONS.md`'s C-17
++  row, form (a)). (`audit_query` is
+@@ -244,2 +244,2 @@ real-instance verification procedure).
+-  `unavailable`/`unsupported`. **`idempotency` (Phase 9 WP-3c, `cell.py:3887`)
+-  and `application_catalog` (Phase 6 WP-3, `cell.py:3860`) no longer belong
++  `unavailable`/`unsupported`. **`idempotency` (Phase 9 WP-3c, `capabilities_document.py::build_capabilities_document`)
++  and `application_catalog` (Phase 6 WP-3, `capabilities_document.py::build_capabilities_document`) no longer belong
+@@ -256,5 +256,11 @@ real-instance verification procedure).
+-  2026-09-06): `requests_per_minute` and `concurrency` are `enforced` --
+-  `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:744`,
+-  `:775-782`, `:785-794`), declared in `limit_enforcement`
+-  (`cell.py:4051`, `:4055`); `execution_ms` is declared
+-  `reference_wall_clock`, not `enforced` (`cell.py:4044`) -- a wall-clock
++  2026-09-06): `requests_per_minute` and `concurrency` are bounded by
++  `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py::_LimitStateHolder`)
++  and declared in `limit_enforcement` as `enforced` while the declared
++  process ceiling is 1 or the bound is held by a mechanism shared across
++  every worker (the PostgreSQL-backed rate row for `requests_per_minute`,
++  the host-shared slot directory for `concurrency` with this supervisor's
++  own worker count at least the declared ceiling), and as
++  `deployment_required` otherwise (`capabilities_document.py::resolve_limit_enforcement`,
++  called from `capabilities_document.py::build_capabilities_document`);
++  `execution_ms` is declared
++  `reference_wall_clock`, not `enforced` (`capabilities_document.py::build_capabilities_document`) -- a wall-clock
+@@ -263 +269 @@ real-instance verification procedure).
+-  statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`),
++  statement_timeout`/`lock_timeout` (`backend_postgres.py::PostgresBackend._set_timeouts`),
+@@ -268,2 +274,8 @@ real-instance verification procedure).
+-  this kind of control (`contract/data-service-api.v1.json:198,1201`), but
+-  it appears nowhere in either peer's own declaration code.
++  this kind of control (`limit_enforcement` in `spec/data-service-api.v1.json`),
++  and this peer's own declaration code does emit it:
++  `capabilities_document.py::resolve_limit_enforcement` returns
++  `deployment_required` instead of `enforced` for a class bound only by
++  in-process state once the declared process ceiling is above 1 (the data
++  plane's `concurrency` and `requests_per_minute` unless the host-shared
++  mechanism is wired, and the control plane's two request-rate classes
++  through `control_plane.py::ControlPlaneService.control_capabilities`).
+diff --git a/MitateDB-api/tests/test_audit_query.py b/MitateDB-api/tests/test_audit_query.py
+index 5b1289e..67c6286 100644
+--- a/MitateDB-api/tests/test_audit_query.py
++++ b/MitateDB-api/tests/test_audit_query.py
+@@ -1847 +1847 @@ def test_authenticate_and_assert_active_denials_are_durable_not_excluded() -> No
+-    # REAL, resolved credential/application identity (`auth.py:424-429`'s
++    # REAL, resolved credential/application identity (`auth.py::CredentialStore.authenticate`'s
+@@ -1889 +1889 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
+-        # branch a few lines down (`credential_store_postgres.py:445` --
++        # branch a few lines down (`credential_store_postgres.py::PostgresCredentialStore.authenticate` --
+@@ -1913 +1913 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
+-            pg_store.authenticate(real_secret_pg)  # -> credential_store_postgres.py:445's `if not valid:` branch
++            pg_store.authenticate(real_secret_pg)  # -> credential_store_postgres.py::PostgresCredentialStore.authenticate's `if not valid:` branch
+@@ -1931 +1931 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
+-        # store_postgres.py:445`'s own `if not valid:` branch specifically)
++        # store_postgres.py::PostgresCredentialStore.authenticate`'s own `if not valid:` branch specifically)
+@@ -2046 +2046 @@ def test_declared_audit_event_classes_change_only_deliberately() -> None:
+-    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py:76`,
++    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py::DECLARED_AUDIT_EVENT_CLASSES`,
+@@ -2535,5 +2535,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
+-    # named `_ConstraintDeclarationError` (never surfaced past its own
+-    # module) from inside the pinned function, and each peer's own direct
+-    # caller (`structured._fail_constraint_declaration` / `cell._validate_
+-    # enum_declaration_with_path`) is the one place that translates it to
+-    # the peer's own public denial shape -- so the difference the two
++    # named `_ConstraintDeclarationError` from inside the pinned function
++    # (an internal signal no public response carries: r2db's call sites in
++    # `structured.py`/`postgres.py` catch it and translate it through
++    # `schema_binding.py::_fail_constraint_declaration`, MitateDB-api's
++    # `constraint_resolution.py::_validate_enum_declaration_with_path`
++    # catches it and translates it) -- each translation lands on the
++    # peer's own public denial shape, so the difference the two
+diff --git a/MitateDB-api/tests/test_limit_class_vocabulary.py b/MitateDB-api/tests/test_limit_class_vocabulary.py
+index 13cedb3..7eb3eb7 100644
+--- a/MitateDB-api/tests/test_limit_class_vocabulary.py
++++ b/MitateDB-api/tests/test_limit_class_vocabulary.py
+@@ -157 +157 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class()
+-        f"concurrency_slot` x1 `concurrency`), backend_sqlite.py x1 (`_check_deadline`'s app-side `execution_ms` "
++        f"concurrency_slot` x1 `concurrency`; current homes after the R-37 module split: `request_limits.py` holds the 3 `_measure_request_bytes` sites and the `_check_operation_depth` site, `cell.py`'s `_LimitStateHolder` holds the other 2), backend_sqlite.py x1 (`_check_deadline`'s app-side `execution_ms` "
+@@ -166 +166 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class()
+-        f"`enum_members` LIMIT_EXCEEDED pre-flight check in `_resolve_field_constraints` (serving `create_entity`'s "
++        f"`enum_members` LIMIT_EXCEEDED pre-flight check in `_resolve_field_constraints` (now in `constraint_resolution.py`; `add_field` and `alter_field` stay in `cell.py`) (serving `create_entity`'s "
+diff --git a/r2db-api/tests/test_audit_query.py b/r2db-api/tests/test_audit_query.py
+index eeb6bb5..482adaa 100644
+--- a/r2db-api/tests/test_audit_query.py
++++ b/r2db-api/tests/test_audit_query.py
+@@ -1491,2 +1491 @@ def _iter_field_definitions(paths: list[Path], field: str) -> list[tuple[str, Pa
+-# (context, body, request_id=...)` positional-call convention, `http.py:
+-# 355`) for no audit-safety benefit. Each entry names its qualified
++# (context, body, request_id=...)` positional-call convention, `http.py::post_schema`) for no audit-safety benefit. Each entry names its qualified
+@@ -2755,5 +2754,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
+-    # named `_ConstraintDeclarationError` (never surfaced past its own
+-    # module) from inside the pinned function, and each peer's own direct
+-    # caller (`structured._fail_constraint_declaration` / `cell._validate_
+-    # enum_declaration_with_path`) is the one place that translates it to
+-    # the peer's own public denial shape -- so the difference the two
++    # named `_ConstraintDeclarationError` from inside the pinned function
++    # (an internal signal no public response carries: r2db's call sites in
++    # `structured.py`/`postgres.py` catch it and translate it through
++    # `schema_binding.py::_fail_constraint_declaration`, MitateDB-api's
++    # `constraint_resolution.py::_validate_enum_declaration_with_path`
++    # catches it and translates it) -- each translation lands on the
++    # peer's own public denial shape, so the difference the two
+@@ -4337 +4338 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
+-# `control_composition.py:128` (`MITATEDB_CONTROL_REQUEST_BYTES_LIMIT`)
++# `control_composition.py::build_control_service` (`MITATEDB_CONTROL_REQUEST_BYTES_LIMIT`)
+@@ -4340 +4341 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
+-# `tests/test_control_main.py:165` `test_build_control_app_request_bytes_
++# `tests/test_control_main.py::test_build_control_app_request_bytes_
+@@ -4356 +4357 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(platform
+-    (`control_http.py:430`) reads `control_service.limits` directly -- the
++    (`control_http.py::create_control_app`) reads `control_service.limits` directly -- the
+diff --git a/r2db-api/tests/test_foundation.py b/r2db-api/tests/test_foundation.py
+index 34dd930..aa9a2d4 100644
+--- a/r2db-api/tests/test_foundation.py
++++ b/r2db-api/tests/test_foundation.py
+@@ -504,3 +504,2 @@ def test_r2_capability_artifact_matches_real_capabilities_response(service):
+-            # features gated by `structured_query` alone (service.py's own
+-            # capabilities() comment: "structured_query: enabled (order_by
+-            # / pagination が実行可能になったため)").
++            # features gated by `structured_query` alone (`structured_query` is
++            # `enabled` in `capabilities_document.py::build_capabilities_document`).
+@@ -617 +616 @@ def test_delete_rejects_truthy_non_boolean_destructive_before_confirmation(servi
+-    `isinstance(bool)` check, structured.py:229, newly locked down by a
++    `isinstance(bool)` check, `mutation_binding.py::bind_mutation`, newly locked down by a
+@@ -886 +885 @@ def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded
+-    reclassification (structured.py:212) -- this was not actually covered
++    reclassification (`mutation_binding.py::bind_mutation`'s `len(raw_values) > 100` branch) -- this was not actually covered
+@@ -913 +912 @@ def test_every_advertised_resource_limit_has_a_deterministic_boundary():
+-    # check`'s own dynamic `kind`-as-limit_class call site (limits.py:35),
++    # check`'s own dynamic `kind`-as-limit_class call site (`limits.py::ResourceLimits.check`),
+@@ -1280 +1279 @@ def test_add_field_field_type_value_outside_the_seven_word_vocabulary_is_validat
+-    scalar `field_type` (`structured.py:702`'s sibling to the create_entity
++    scalar `field_type` (`structured.py::bind_schema_operation`'s add_field sibling to the create_entity
+```

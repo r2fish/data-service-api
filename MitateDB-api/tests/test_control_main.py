@@ -257,7 +257,7 @@ def test_build_control_service_rejects_every_removed_env_var_through_the_real_co
     root` closes for the data plane -- `reject_removed_timeout_env`/
     `reject_removed_surface_env` were exercised ONLY as bare function
     calls in `test_platform_declarations.py`, never through `build_
-    control_service` itself (`control_composition.py:104-105`). 8 cases:
+    control_service` itself (`control_composition.py::build_control_service`). 8 cases:
     {the 2 removed timeout vars, the 2 removed surface vars} x {empty
     string, a real-looking value}."""
     env = _env(control_platform)
@@ -418,7 +418,7 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(control_
 
 def test_build_control_app_declares_audit_query_status_from_mitatedb_audit_dsn_env(control_main_module, control_platform) -> None:
     """`control_composition.build_control_service`'s own `audit_dsn = env.
-    get("MITATEDB_AUDIT_DSN") or None` read (`control_composition.py:169`)
+    get("MITATEDB_AUDIT_DSN") or None` read (`control_composition.py::build_control_service`)
     must reach a real `GET /control/v1/capabilities` response two ways,
     built through `control_main.build_control_app` itself -- the literal
     entry-point factory, not `build_control_service` directly:
@@ -508,8 +508,7 @@ def test_build_control_service_declares_audit_query_enabled_with_audit_dsn(contr
 def _count_control_authentication_denials(control_platform) -> int:
     """Counts only rows shaped exactly like `ControlPlaneService.
     _authenticate`'s own except-`AuthenticationError` denial
-    (`event_class`/`reason_code`/`target_kind` per `control_plane.py:1256-
-    1258`) with `actor_id IS NULL` folded directly into the `WHERE`
+    (`event_class`/`reason_code`/`target_kind` per `control_plane.py::ControlPlaneService._authenticate`) with `actor_id IS NULL` folded directly into the `WHERE`
     clause -- review B-1's "never record the client-claimed id" discipline
     (`_deny_audit` is never passed an `actor_id` on this path), asserted
     here as a query-level constraint rather than a separate row fetch."""

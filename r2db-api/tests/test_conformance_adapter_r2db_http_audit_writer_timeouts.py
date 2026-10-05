@@ -137,7 +137,7 @@ def test_http_conformance_adapter_declares_the_conformance_deployment_visibility
     conformance-deployment module constants (`CONFORMANCE_AUDIT_STATEMENT_
     TIMEOUT_MS` + `CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS` + `VISIBILITY_LAG_
     CLOCK_SKEW_MARGIN_MS`) -- checked BOTH against that same-source sum
-    (guards the construction call site at `:1496`) AND against the literal
+    (guards `conformance_adapter_r2db_http.py::R2DBHttpConformanceAdapter._build_control_stack`'s construction call site) AND against the literal
     `4000` (guards the two module constants themselves drifting away from
     the value both this plug and MitateDB-api's own HTTP plug must agree
     on, design D-1: "両辺同源の穴を塞ぐ")."""

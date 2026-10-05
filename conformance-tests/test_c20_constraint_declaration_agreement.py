@@ -151,9 +151,9 @@ def _revision_advanced_by_one(before: str, after: str) -> bool:
 
     Both currently-registered peers keep their schema revision as a
     monotonic integer counter incremented by exactly one per committed
-    schema operation (`r2db-api/src/r2db_api/structured.py:1821`
+    schema operation (`r2db-api/src/r2db_api/structured.py::ApplicationCell._apply_schema_locked`'s
     `self.schema_revision += 1`; `MitateDB-api/src/mitatedb_api/
-    backend_sqlite.py:198`/`:294`/`:434` `self._schema_revision += 1`; the
+    backend_sqlite.py::SQLiteBackend`'s `self._schema_revision += 1`; the
     Postgres backends mirror this via `_bump_revision`/`_bump_schema_
     revision`), and `SchemaOperationResult.revision` reports that
     counter stringified (`schema_operation_with_result`'s own

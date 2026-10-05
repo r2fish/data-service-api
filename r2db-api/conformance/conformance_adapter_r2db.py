@@ -224,10 +224,10 @@ def _hold_in_flight_via_stalled_cell_method(cell_obj: object, method_name: str, 
     threads each issue one genuine, full port-level request
     (`make_request()`, e.g. `DataService.catalog(session)`) that reaches
     this stall point ONLY after passing through `DataService._slot`'s own
-    concurrency-counter increment (`self._active += 1`, `service.py:1004`)
+    concurrency-counter increment (`self._active += 1`, `service.py::DataService._slot`)
     -- both of this helper's current callers pass `method_name="catalog"`,
     whose real dispatch to `self._cells[app_id].catalog(self.limits)` sits
-    INSIDE that same `with self._slot(context)` block at `service.py:942`
+    INSIDE that same `with self._slot(context)` block in `service.py::DataService.catalog`
     (Phase 8 WP-1 rework 3, 裁定 3, 監督裁定 2026-09-07: corrected from
     this docstring's own former, unrelated `:758`/`:845`/`:907`
     citations -- those are the SAME `_slot`-guarded dispatch pattern's
@@ -316,7 +316,7 @@ def _hold_in_flight_via_stalled_cell_method(cell_obj: object, method_name: str, 
 # matching, genuinely fresh) and stall it after `_idempotency_reserve`
 # returns -- the end of the admission window, after the count reservation,
 # before `_transact_locked`/`_apply_schema_locked` ever executes anything
-# (`structured.py:2269`/`:2294`, `:2697`/`:2718`).
+# (`structured.py::ApplicationCell._transact_locked`/`._apply_schema_locked`).
 
 
 @contextmanager
@@ -517,7 +517,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # instance a SMALL conformance profile -- `None` (every
         # pre-WP-4 caller, this repository's own session-scoped
         # construction included) keeps `DataService`'s own default
-        # (`ResourceLimits()`, `service.py:667`), unchanged.
+        # (`ResourceLimits()`, `service.py::DataService.__init__`), unchanged.
         #
         # Synthetic pepper for this conformance run only; never a real
         # deployment secret and never read from the environment.
@@ -1006,12 +1006,12 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
     # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
     # SAME per-application cell object `DataService._slot`'s own dispatch
-    # (`service.py:758`/`:845`/`:907`/`:942`) calls INTO -- so the
+    # (`service.py::DataService._query_outcome`/`._mutate_outcome`/`.schema`/`.catalog`) calls INTO -- so the
     # stall point sits after the concurrency counter's own increment
     # (`_slot`), before any backend call. `catalog()` is the stalled
     # method: takes an optional `limits` argument, needs no pre-existing
     # entity/row, and is a real, already-present dispatch
-    # (`self._cells[app_id].catalog(self.limits)`, `service.py:942`) --
+    # (`self._cells[app_id].catalog(self.limits)`, `service.py::DataService.catalog`) --
     # not a method invented for this primitive.
     def hold_in_flight(self, session, n: int):
         """See `ConformanceAdapter.hold_in_flight`'s own docstring
@@ -1028,7 +1028,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     # WP-6d-ii): wraps the SAME per-application cell's own
     # `_idempotency_lookup`/`_idempotency_reserve` bound methods
     # `structured.ApplicationCell.transact`/`apply_schema` already call
-    # at `structured.py:2269`/`:2294` and `:2697`/`:2718`. See
+    # in `structured.py::ApplicationCell._transact_locked`/`._apply_schema_locked`. See
     # `_hold_after_idempotency_lookup_via_stalled_cell_methods`'s own
     # module comment for why the cell's own `self._idempotency_lock`
     # (not this hook) is what a concurrent second request actually waits
@@ -1255,7 +1255,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     ) -> list[dict]:
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         # port v1.12 (L7-21): `limit` maps directly onto `DataService.
-        # query`'s own pre-existing `page_size` keyword (`service.py:719`,
+        # query`'s own pre-existing `page_size` keyword (`service.py::DataService.query`,
         # unchanged by this WP) -- `None` omits it, letting that method's
         # own default (100) apply exactly as every pre-v1.12 caller here
         # already observed.
@@ -1282,8 +1282,8 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         where = [{"field": field, "operator": operator, "value": value}]
         # port v1.12 (L7-21): additional predicates are appended to the
         # SAME real `where` list `DataService.query` already accepts
-        # (`service.py:719`, `len(where)` already folds into this peer's
-        # own `query_complexity` metric, `structured.py:1183`) -- never a
+        # (`service.py::DataService.query`, `len(where)` already folds into this peer's
+        # own `query_complexity` metric, `structured.py::ApplicationCell.query`) -- never a
         # second query stitched together by this adapter.
         if extra_predicates:
             where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
@@ -1913,7 +1913,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     ) -> Mapping[str, Any]:
         """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
         §7 段 (9)): `attempt_filter`'s own `where` construction, presented
-        to `DataService.query_page` (`service.py:726`) together with that
+        to `DataService.query_page` (`service.py::DataService.query_page`) together with that
         SAME method's pre-existing `order_by`/`page_size`/`budget`
         keywords -- all four already live there (unchanged by this WP),
         exactly as `query_with_budget` above already presents `budget`
@@ -1961,7 +1961,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         to carry a caller-chosen `where`/`order_by` (a port-neutral tuple
         sequence) instead of a single `field`/`value` equality. `cursor`/
         `order_by`/`page_size` map onto that method's own pre-existing
-        keywords (`service.py:726`, CCR-13) unchanged by this WP; `budget`
+        keywords (`service.py::DataService.query_page`, CCR-13) unchanged by this WP; `budget`
         follows the exact `None`-omits-the-field convention `query_with_
         budget`'s own docstring states."""
         where_body = [{"field": f, "operator": op, "value": v} for f, op, v in where] if where else None

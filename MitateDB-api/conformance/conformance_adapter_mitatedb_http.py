@@ -2716,7 +2716,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         # port v1.12 (L7-21): `limit` maps directly onto `_query`'s own
-        # pre-existing `page_size` keyword (`:971`, unchanged by this WP),
+        # pre-existing `page_size` keyword (unchanged by this WP),
         # which puts `{"page": {"size": page_size}}` on the real wire body
         # (`QueryRequest.page.size`) -- `None` omits it.
         result = self._query(session, entity, select=select, where=where, page_size=limit)
@@ -2765,7 +2765,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # always supplies (P3-D1's own default) -- and on the stale claim
         # that `application_catalog` is `unavailable` here. Neither holds
         # any more: `application_catalog` is `enabled` unconditionally on
-        # this composition (`MitateDB-api/src/mitatedb_api/cell.py:1769`),
+        # this composition (`MitateDB-api/src/mitatedb_api/capabilities_document.py::build_capabilities_document`),
         # `GET /v1/catalog` is real and mounted (see `catalog_document`
         # below), and port v1.13's `schema_operation_with_result` (D-2)
         # lets a caller `create_entity` with an arbitrary `fields` list
@@ -3355,7 +3355,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     ) -> Mapping[str, Any]:
         """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
         §7 段 (9)): `attempt_filter`'s own `where` construction, presented
-        to `_query` (`:1273`) together with that SAME helper's pre-existing
+        to `_query` together with that SAME helper's pre-existing
         `order_by`/`page_size` keywords and its `extra_body` merge (which
         carries `budget`, exactly as `query_with_budget` above already
         carries it alone)."""

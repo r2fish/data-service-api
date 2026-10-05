@@ -76,13 +76,13 @@ def _waiter_application_name_re(peer_token: str) -> "re.Pattern[str]":
     (`^[a-z0-9]+:data:\\d+$`) rejects the ACTUAL `application_name` shape
     the work order's own completion conditions 68/126 require WP-2/WP-3
     to produce -- `r2db-api:data:<pid>` and `MitateDB-api:data:<pid>`
-    (`WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md`:231, :339) -- both carry
+    (`WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md`, completion conditions 68/126) -- both carry
     a `-` and MitateDB's own carries uppercase letters, so `assert not
     unmatched` would stay red forever even after WP-2/WP-3 land the real
     tagging. Built from `launcher.name` (the SAME per-peer token already
     used by `conformance-tests/registry.json` and every `RealServer*`
-    class's own `name` class attribute -- `real_server_r2db.py`:639,
-    `real_server_mitatedb.py`:581) instead of a generic charset, so it
+    class's own `name` class attribute -- `real_server_r2db.py::RealServerR2db.name`,
+    `real_server_mitatedb.py::RealServerMitateDB.name`) instead of a generic charset, so it
     matches ONLY that one launcher's own documented token, exactly,
     followed by `:data:<pid>` -- never a different peer's name, a
     substring of it, or a name with a different case."""

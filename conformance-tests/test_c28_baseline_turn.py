@@ -173,9 +173,9 @@ def test_c28_baseline_turn(adapter: ConformanceAdapter, isolated) -> None:
     )
     # code review 2026-09-24b (再レビュー 指摘 1): `ConformanceDenial` has no
     # `message` attribute (`getattr(denial, "message", None)` always
-    # returns `None` -- `conformance-tests/adapter.py:132-135, 163-172`),
+    # returns `None` -- `conformance-tests/adapter.py::ConformanceDenial`),
     # so a message-side non-echo check needs the port's own non-echo
-    # inspection point instead: `native_cause_of(denial)` (`adapter.py:433`,
+    # inspection point instead: `native_cause_of(denial)` (`adapter.py::native_cause_of`,
     # sanctioned there for exactly this "non-echo inspection", never for
     # recovering denial semantics), whose `str()` on every currently-
     # registered plug is the peer's own real denial message (the in-process

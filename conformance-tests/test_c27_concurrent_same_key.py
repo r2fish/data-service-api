@@ -145,7 +145,7 @@ def _assert_not_yet_done(result: _ThreadResult, *, adapter_name: str, what: str)
 
 
 #: Memoizes `_gate`'s own result per adapter NAME for the lifetime of this
-#: worker process (`conformance-tests/conftest.py:96`'s own xdist-group-by-
+#: worker process (`conformance-tests/conftest.py::pytest_collection_modifyitems`'s own xdist-group-by-
 #: adapter-param assignment keeps every one of this file's tests for a
 #: given plug on the SAME worker, so this cache is never read across a
 #: process boundary). `capability_document()` on the HTTP plugs issues a

@@ -317,7 +317,7 @@ def test_migration_0008_grants_select_to_both_writer_roles_and_nothing_to_public
     name the GRANT explicitly; no prior test in this file observed
     `has_table_privilege` for `platform_declarations`. Mirrors MitateDB-
     api's `tests/test_migration_0007_ddl.py::test_0007_grants_select_to_
-    both_roles_and_nothing_to_public` (line 130 at audit time)."""
+    both_roles_and_nothing_to_public`."""
     with psycopg.connect(bare_platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -345,8 +345,7 @@ def test_migration_0008_seeds_window_default_but_not_surfaces(bare_platform: typ
     coalescing-window` tests in this file, so its declarations-table state
     at any given point depends on test execution order). Mirrors MitateDB-
     api's `tests/test_migration_0007_ddl.py::test_0007_seeds_window_
-    default_and_audit_writer_roles_but_not_surfaces` (line 122 at audit
-    time)."""
+    default_and_audit_writer_roles_but_not_surfaces`."""
     with psycopg.connect(bare_platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -473,7 +472,7 @@ def test_set_platform_timeouts_rejects_zero_and_negative_values(ops_env: types.S
 def test_main_returns_exit_code_1_on_a_foundation_or_psycopg_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """{scratchpad}/wp12-audit-gaps.md G2 (completion condition 11): `ops.
     main`'s `except FoundationError`/`except psycopg.Error` branches
-    (ops.py:1438-1443) both return 1 -- observed nowhere in this file
+    (`ops.py::main`) both return 1 -- observed nowhere in this file
     before this test, which only ever exercised the argparse-level `_die`
     (`SystemExit(2)`) path above. Points `R2DB_CONTROL_DSN` at a host that
     refuses the TCP connection outright, so `set-platform-timeouts` fails

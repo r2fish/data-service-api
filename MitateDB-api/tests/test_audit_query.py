@@ -1844,7 +1844,7 @@ def test_authenticate_and_assert_active_denials_are_durable_not_excluded() -> No
     assert "credential" in memory_target_kinds, f"both denials must durably record target_kind='credential': {memory_target_kinds!r}"
 
     # WP-3 fix-round M-1: site-level proof -- a durable row carrying the
-    # REAL, resolved credential/application identity (`auth.py:424-429`'s
+    # REAL, resolved credential/application identity (`auth.py::CredentialStore.authenticate`'s
     # own `if authenticated:` branch specifically; the PRE-AUTH branch
     # above NEVER records a real `actor_id`, by design, B-1) must exist.
     assert any(
@@ -1886,7 +1886,7 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
         # in-memory test's own addition -- `credential_store_postgres.py`'s
         # `authenticate`'s PRE-AUTH branch (row is None) above is
         # structurally distinct product code from its own `if not valid:`
-        # branch a few lines down (`credential_store_postgres.py:445` --
+        # branch a few lines down (`credential_store_postgres.py::PostgresCredentialStore.authenticate` --
         # a REAL, digest-matched row refused only by its own enabled/
         # revoked/app-enabled/expiry state). A real application + credential
         # is provisioned through the control plane (the SAME `applications`/
@@ -1910,7 +1910,7 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
         real_secret_pg = real_bearer_pg
         h.service.set_credential_enabled(h.control_credential_secret, real_credential_id_pg, False)
         with pytest.raises(Exception):
-            pg_store.authenticate(real_secret_pg)  # -> credential_store_postgres.py:445's `if not valid:` branch
+            pg_store.authenticate(real_secret_pg)  # -> credential_store_postgres.py::PostgresCredentialStore.authenticate's `if not valid:` branch
 
         time.sleep(h.visibility_lag_ms / 1000 + 0.5)
         result = h.service.audit_query(h.control_credential_secret, {"limit": 200})
@@ -1928,7 +1928,7 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
 
         # WP-3 fix-round M-1: site-level proof -- a durable row carrying the
         # REAL, resolved credential/application identity (`credential_
-        # store_postgres.py:445`'s own `if not valid:` branch specifically)
+        # store_postgres.py::PostgresCredentialStore.authenticate`'s own `if not valid:` branch specifically)
         # must exist.
         assert any(
             event.get("actor_id") == real_credential_id_pg and event.get("application_id") == real_app_pg
@@ -2043,7 +2043,7 @@ def test_declared_target_kinds_cover_every_emittable_target_kind() -> None:
 
 
 def test_declared_audit_event_classes_change_only_deliberately() -> None:
-    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py:76`,
+    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py::DECLARED_AUDIT_EVENT_CLASSES`,
     `_CONTROL_PLANE_EVENT_CLASSES | application_audit.DECLARED_AUDIT_EVENT_
     CLASSES`) currently holds exactly these 12 words. Dropping a word out
     of D and into N (WP-B1's (e), `test_declared_event_classes_cover_
@@ -2532,11 +2532,13 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # adding: the two peers' own exception vocabulary (r2db's `fail()`,
     # MitateDB's `errors.ValidationError`) is kept OUT of the pinned
     # function bodies on both sides -- each peer raises its own locally
-    # named `_ConstraintDeclarationError` (never surfaced past its own
-    # module) from inside the pinned function, and each peer's own direct
-    # caller (`structured._fail_constraint_declaration` / `cell._validate_
-    # enum_declaration_with_path`) is the one place that translates it to
-    # the peer's own public denial shape -- so the difference the two
+    # named `_ConstraintDeclarationError` from inside the pinned function
+    # (an internal signal no public response carries: r2db's call sites in
+    # `structured.py`/`postgres.py` catch it and translate it through
+    # `schema_binding.py::_fail_constraint_declaration`, MitateDB-api's
+    # `constraint_resolution.py::_validate_enum_declaration_with_path`
+    # catches it and translates it) -- each translation lands on the
+    # peer's own public denial shape, so the difference the two
     # peers' error handling genuinely has never enters text this
     # comparison reads.
     ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "validate_enum_declaration"),

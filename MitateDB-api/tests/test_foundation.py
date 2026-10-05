@@ -1455,7 +1455,7 @@ class FoundationTests(unittest.TestCase):
         # (rate limit entered before authorization). This third scenario
         # makes the order itself observable: the SAME credential first
         # spends its own `max_requests_per_minute=1` budget (rate keyed by
-        # `principal.credential_id`, `cell.py:587` (now `:588`)) with one successful
+        # `principal.credential_id`, `cell.py::ApplicationCell._limit_gate`) with one successful
         # call, is THEN revoked, and calls again. Authorization-first
         # means `__authorize` raises `AuthenticationError` on the second
         # call without `_limit_gate` ever being entered a second time; if
@@ -1658,7 +1658,7 @@ class FoundationTests(unittest.TestCase):
         refused by this leaf at all -- it composes a syntactically-valid
         ` WHERE "field" IN ()` with zero placeholders; the "in filter
         requires values" refusal is `cell.py`'s own responsibility
-        (`cell.py:3370`), outside this leaf's boundary -- the two
+        (`cell.py::ApplicationCell._bind_filters`), outside this leaf's boundary -- the two
         backends' extraction moved the SQL-assembly half of this
         predicate out of `cell.py` without moving that value-shape
         check, which stays where it always was."""

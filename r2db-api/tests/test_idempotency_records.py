@@ -163,7 +163,7 @@ def test_condition_3b_omitted_budget_then_resend_with_empty_budget_is_conflict_n
     transaction and confirmation, is part of what a resend must match")
     -- an omitted `budget` and a present-but-empty `budget: {}` are two
     DIFFERENT requests. Pins r2db's own already-correct `if budget is not
-    None:` (`service.py:1237`) against the peer defect (`MitateDB-api`'s
+    None:` (`service.py::DataService._mutate_outcome`) against the peer defect (`MitateDB-api`'s
     `cell.py` used `if budget:`, which dropped an empty-but-PRESENT
     `budget: {}` from the digest exactly as if it had been omitted)."""
     ops = [{"operation": "insert", "values": {"label": "one"}}]
@@ -362,7 +362,7 @@ def test_idempotency_key_is_included_in_the_plan_digest() -> None:
 def test_service_plan_token_changes_with_idempotency_key_through_the_real_request_path() -> None:
     """Ruling J-1 (WP-2cd audit N-1, addendum I-13): fixes I-13's wiring
     THROUGH `DataService._mutate_outcome`'s own `plan_request` assembly
-    (`service.py:1202-1203`), never by handing a hand-built dict straight
+    (`service.py::DataService._mutate_outcome`'s `idempotency_key` branch), never by handing a hand-built dict straight
     to `normalize_request_for_plan`/`compute_plan_token` the way `test_
     idempotency_key_is_included_in_the_plan_digest` above does (that test
     fixes the HELPER; this one fixes the WIRING -- the monitor's own
@@ -410,7 +410,7 @@ def test_service_omitted_budget_then_resend_with_empty_budget_is_conflict_throug
     `test_service_plan_token_changes_with_idempotency_key_through_the_
     real_request_path`'s own "fix the WIRING, not just the helper"
     rationale: drives `DataService._mutate_outcome`'s own `plan_request`
-    assembly (`service.py:1237`, `if budget is not None:`) through the
+    assembly (`service.py::DataService._mutate_outcome`, `if budget is not None:`) through the
     real `mutate_result` entry point, rather than handing a hand-built
     `plan_request` straight to `cell.transact` the way `test_condition_3b_
     ...` above does."""

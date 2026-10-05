@@ -1341,8 +1341,8 @@ def test_apply_platform_migration_0014_survives_a_registry_role_dropped_before_i
     application.sql` can leave behind if it fails between its own `DROP
     ROLE` and `finish_deprovision_application`) does not abort 0014 --
     section 2's loop below carries the same `IF EXISTS (SELECT 1 FROM
-    pg_roles WHERE rolname = ...)` guard 0013's own section 2 carries
-    (0013:91-96). The platform-plane roles and a second, still-real
+    pg_roles WHERE rolname = ...)` guard 0013's own section 2 carries.
+    The platform-plane roles and a second, still-real
     application's own roles still reach 132/36/12/68."""
     auditreader_role = f"{platform.prefix}svc_auditreader"
     _d1, rt1, dv1 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f125a")

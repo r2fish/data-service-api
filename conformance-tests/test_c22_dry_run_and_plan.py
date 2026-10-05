@@ -183,9 +183,9 @@ def _revision_advanced_by_one(before: str, after: str) -> bool:
 
     Both currently-registered peers keep their schema revision as a
     monotonic integer counter incremented by exactly one per committed
-    schema operation (`r2db-api/src/r2db_api/structured.py:1821`
+    schema operation (`r2db-api/src/r2db_api/structured.py::ApplicationCell._apply_schema_locked`'s
     `self.schema_revision += 1`; `MitateDB-api/src/mitatedb_api/
-    backend_sqlite.py:198`/`:294`/`:434` `self._schema_revision += 1`; the
+    backend_sqlite.py::SQLiteBackend`'s `self._schema_revision += 1`; the
     Postgres backends mirror this via `_bump_revision`/`_bump_schema_
     revision`), and `SchemaOperationResult.revision` reports that
     counter stringified (`schema_operation_with_result`'s own
@@ -359,7 +359,7 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
         # never `count_before_all` (captured before this entity had any
         # rows at all), which the (1) precondition sub-leg above may
         # already have moved on by exactly one real, harmless seed insert
-        # (declare-first on `revision_preconditions`, lines 281-301) on a
+        # (declare-first on `revision_preconditions`, sub-leg (1)) on a
         # plug where that sub-leg actually runs. The dry_run-must-not-
         # change-state assertion below is about the two dry runs
         # themselves, not about the sub-legs that preceded them, so its

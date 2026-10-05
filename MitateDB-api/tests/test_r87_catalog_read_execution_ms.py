@@ -71,7 +71,7 @@ from .test_postgres import _dsn_with, app_a, platform, sessions_for  # noqa: F40
 # timeouts.sql`, and `FoundationConfig`'s own class-attribute default) --
 # a coincidental match against either default cannot pass these tests by
 # accident (mirrors `test_main.py`'s own `MITATEDB_MAX_CONCURRENCY=7`
-# precedent for the identical reason), and directly measures `:685`'s own
+# precedent for the identical reason), and directly measures the
 # claim that a deployment declaring `execution_ms` above 5000 also raises
 # the effective bound on these 8 reads above 5000 (`security/CONTROL_
 # MAPPING.md`, R-87 (1b)/(ii)).

@@ -27,8 +27,8 @@ support, CCR-13), and this suite must not call that a bug.
 
 The `observed_branch` cross-check against the plug's own declared version
 (work order §1's own hand-off from `WORK_ORDER_PHASE9_CONTRACT_170_V1.md`
-§6 correction 7, mirrored from `test_c25_result_request_id.py`:433-450
-and `test_c21_denial_details_vocabulary.py`:366-385) is done ONLY in the
+§6 correction 7, mirrored from `test_c25_result_request_id.py::test_c25_result_request_id`
+and `test_c21_denial_details_vocabulary.py::test_c21_denial_details_vocabulary`) is done ONLY in the
 `>= 1.10.0` branch: doing it unconditionally would make `expected_branch`
 always disagree with a hardcoded `observed_branch` in the `< 1.10.0`
 branch, making a genuine strict XPASS structurally impossible there. In
@@ -518,7 +518,7 @@ def test_c30_cursor_is_stateless(
     credential of the SAME Application as the one that issued the cursor,
     authenticated on the SHARED, session-scoped adapter (`fx`), never an
     `isolated_application_surface()` (a "FRESH, throwaway data-plane
-    instance", adapter.py:1641 -- a second credential issued there is
+    instance", `adapter.py::ConformanceAdapter.isolated_application_surface` -- a second credential issued there is
     still the SAME isolated instance's own state, not an independent
     re-authentication path)."""
     contract_version = adapter.capability_document()["contract_version"]
