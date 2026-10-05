@@ -488,26 +488,24 @@ def _diff_against_allowlist(unresolved, allowlist: dict):
 # instead (a real removal is not possible from an empty table).
 POSITION_REF_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
-# D-7: floors, each measured on this file's own corrected worktree
-# (2026-09-23, base dd12657 + WP-2 corrections + return-1 review corrections,
-# this file's own `_scan_repo`: 49 files, 1452 units, shapes a=26 b=3 c=17
-# (a' has no floor -- D-7, current corpus carries 0), routes i=26 iii=20),
-# each floor set to that measurement minus a margin, so a regression in
-# extraction/resolution/scan-target logic is caught rather than a floor
-# that only guards against zero. Shape (a)'s own margin is exactly 4
-# (measured 26, floor 22) on purpose (F-4/D-7): the 5 line-wrapped
-# shape-(a) references in the real corpus (test_c20/test_c22's own
-# backend_sqlite.py wrap, test_c04's own capabilities_document.py and
-# conformance_adapter_r2db_http.py wraps, and test_c05's own pinned
-# structured.py wrap) all stop parsing as shape (a) under M5a (the
-# join-rule mutation), dropping the real count to 21 -- below this floor.
+# D-7: floors. SCAN_FILES_FLOOR and SCAN_UNITS_FLOOR are each this file's
+# own measurement (2026-09-23, 49 files, 1452 units) minus a margin. The
+# shape and route floors below were set to the measured value as-is, no
+# margin, by R-39 CS-2 (2026-10-05, this file's own `_scan_repo`: 61 files,
+# 1833 units, shapes a=2 b=0 c=2, routes i=2 iii=2; before CS-2: a=27 b=3
+# c=16 a'=5, i=24 iii=27): R-39 CS-2 replaced line-number references with
+# symbol forms, so the real corpus's shape counts fell. A floor guarantees that the
+# scan still passes through each shape; it is not a device for keeping
+# references. Shape (b) has no real reference left, so its floor is 0 and
+# its extraction is pinned by the synthetic fixture
+# `test_shape_a_and_b_resolve_via_route_i_and_stay_in_range` below.
 SCAN_FILES_FLOOR = 47
 SCAN_UNITS_FLOOR = 1420
-SHAPE_A_FLOOR = 22
-SHAPE_B_FLOOR = 2
-SHAPE_C_FLOOR = 15
-ROUTE_I_FLOOR = 22
-ROUTE_III_FLOOR = 17
+SHAPE_A_FLOOR = 2
+SHAPE_B_FLOOR = 0
+SHAPE_C_FLOOR = 2
+ROUTE_I_FLOOR = 2
+ROUTE_III_FLOOR = 2
 
 
 def test_scan_target_is_every_py_file_under_conformance_tests_recursive(tmp_path):
@@ -786,26 +784,34 @@ def test_scan_meets_the_floor_for_files_units_shapes_and_routes():
     assert routes.get("iii", 0) >= ROUTE_III_FLOOR, routes
 
 
-def test_pin_the_one_remaining_line_wrapped_position_reference_in_the_real_corpus():
-    """Completion condition 6: `structured.py`, line 923 (corrected in the
-    R-95 return-1 review -- this same line was previously cited as line
-    1198, itself a rot the original WP-2 pass missed), cited inside
-    `test_c05_limit_declaration_agreement.py`'s own `_drive_result_items`
-    docstring, split across 2 physical lines the same way the WP-2
-    corrections leave -- WP-2 deliberately leaves this one wrap in place
-    (D-6). A regression in D-2's own join rule breaks this real reference,
-    not only the synthetic fixtures above."""
-    path = CONFORMANCE_TESTS_DIR / "test_c05_limit_declaration_agreement.py"
-    found = None
-    for unit in _all_units_for_file(path):
-        text = _join_unit_lines(unit["lines"])
-        for ref in _extract_refs(text):
-            if ref["path"] and ref["path"].endswith("structured.py") and ref["l1"] == 923:
-                found = ref
-    assert found is not None, "the line-wrapped structured.py reference (line 923) was not extracted"
-    resolved, route, note = _resolve_ref(found, REPO_ROOT)
-    assert resolved is not None and note is None, (resolved, route, note)
-    assert _range_note(found, resolved) is None
+def test_fixture_line_wrapped_position_reference_is_joined_and_resolved(tmp_path):
+    """Completion condition 6, moved from the real corpus to a synthetic
+    fixture (R-39 CS-2 replaced the real corpus's last line-wrapped
+    references by symbol forms, so no real wrap is left to pin): a
+    docstring and a comment each carry a backtick-quoted path split across
+    2 physical lines. Driven through the file-level pipeline
+    (`_all_units_for_file`, `_join_unit_lines`, `_extract_refs`,
+    `_resolve_ref`, `_range_note`), so a regression in D-2's own join rule
+    breaks it the way it would break a real wrapped reference."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "wrapped_module.sql").write_text("1\n2\n3\n4\n5\n")
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        '"""see `pkg/wrapped_\n'
+        '    module.sql:3` here."""\n'
+        "\n\n"
+        "# see `pkg/wrapped_\n"
+        "# module.sql:4` here\n"
+        "x = 1\n"
+    )
+    refs = []
+    for unit in _all_units_for_file(sample):
+        refs.extend(_extract_refs(_join_unit_lines(unit["lines"])))
+    assert sorted(r["raw"] for r in refs) == ["pkg/wrapped_module.sql:3", "pkg/wrapped_module.sql:4"], refs
+    for ref in refs:
+        resolved, route, note = _resolve_ref(ref, tmp_path)
+        assert resolved is not None and route == "i" and note is None, (ref, resolved, route, note)
+        assert _range_note(ref, resolved) is None
 
 
 def test_this_file_is_meaningful_under_a_standalone_pytest_invocation():

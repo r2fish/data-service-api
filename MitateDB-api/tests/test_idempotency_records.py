@@ -328,7 +328,7 @@ class IdempotencyRecordsTests(unittest.TestCase):
     # transaction and confirmation, is part of what a resend must
     # match") -- an omitted `budget` and a present-but-empty `budget: {}`
     # are two DIFFERENT requests, exactly like r2db's own `plan_request`
-    # (`if budget is not None:`, `r2db-api/src/r2db_api/service.py:1237`).
+    # (`if budget is not None:`, `r2db-api/src/r2db_api/service.py::DataService._mutate_outcome`).
     # Before this fix, `cell.py::transact`'s own `digest_request`
     # construction used `if budget:` (truthy), which drops an empty-but-
     # PRESENT `budget: {}` from the digest exactly as if it had been
@@ -364,7 +364,7 @@ class IdempotencyRecordsTests(unittest.TestCase):
     # each receives `budget` for limit narrowing (see `_gate(...,
     # budget=...)`) but, before this fix, never folded it into its OWN
     # `digest_request` -- only the HTTP layer's `digest_extra` carried it
-    # (`http.py`'s schema-operation dispatch, ~:1260). A direct,
+    # (`http.py::post_schema`'s `digest_extra`). A direct,
     # in-process caller (bypassing HTTP, exactly like every other test in
     # this class) proves the cell-level digest itself now covers
     # `budget`, not merely that HTTP happens to inject it separately.

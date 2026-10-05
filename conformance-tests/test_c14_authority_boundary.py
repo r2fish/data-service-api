@@ -743,8 +743,8 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
                 # EXCEEDED assertion uses (`test_c16_cross_entity_
                 # atomicity.py`'s `limit_class` check, same correction
                 # applies there). Both currently-registered peers do emit
-                # it (`r2db-api/src/r2db_api/control_plane.py:1390`,
-                # `MitateDB-api/src/mitatedb_api/control_plane.py:1322`),
+                # it (`r2db-api/src/r2db_api/control_plane.py::ControlPlaneService._check_rate`,
+                # `MitateDB-api/src/mitatedb_api/control_plane.py::ControlPlaneService._check_rate`),
                 # so this is a real, reachable-once-provided-branch check,
                 # not a dead assertion. `conformance-tests/test_c05_limit_
                 # declaration_agreement.py`'s own V2 vector is the common

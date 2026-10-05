@@ -97,7 +97,7 @@ def _bootstrapped(limits=None):
 # Phase 5 D-3 (Q3 案A, WP-4): the former [1, 200] ceiling on all four
 # request-count classes is removed -- `ControlPlaneLimits.__post_init__`
 # now checks only "positive integer" (symmetric with r2db-api's own
-# `ControlPlaneLimits`, r2db-api/src/r2db_api/limits.py:140-143). The
+# `ControlPlaneLimits`, r2db-api/src/r2db_api/limits.py::ControlPlaneLimits.__post_init__). The
 # `201`-valued cases this parametrize used to carry are gone: `201` is now
 # an ordinary accepted value, not a rejection case. The lower-bound (`0`)
 # cases are kept and widened to all FOUR classes (the pre-Phase-5 list only
@@ -130,7 +130,7 @@ def test_limits_reject_control_requests_per_minute_too_close_to_the_margin() -> 
 
 def test_limits_accept_generous_values_beyond_the_former_ceiling() -> None:
     # Same shape as r2db-api's own `_GENEROUS_LIMITS`
-    # (r2db-api/tests/test_control_http.py:57: applications=1_000,
+    # (r2db-api/tests/test_control_http.py::_GENEROUS_LIMITS: applications=1_000,
     # credentials_per_application=1_000, control_requests_per_minute=
     # 100_000; r2db-api/tests/test_audit_query.py's own module-level
     # `_GENEROUS_LIMITS` additionally sets audit_requests_per_minute=

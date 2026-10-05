@@ -299,7 +299,7 @@ def test_at_least_one_adapter_exercises_a_positive_control_mutation():
 
 def test_update_reports_the_real_number_of_rows_affected(adapter, fx: Fixture):
     """Phase 8 WP-1 rework 2 (裁定 1, 監督裁定 2026-09-07): port
-    `adapter.py`'s own `attempt_mutation` docstring (~:2028) is "return
+    `adapter.py`'s own `attempt_mutation` docstring (`adapter.py::ConformanceAdapter.attempt_mutation`) is "return
     the number of rows affected". Test 1 above
     (`test_declared_mutation_operations_match_observed_behavior`) is a
     positive control for "update is declared supported", but its own
@@ -415,7 +415,7 @@ def test_declared_cross_entity_mutation_operations_match_observed_behavior(adapt
         # M-3 (phase 3.5 WP-3 review): the same "refused ... and leaves
         # state unchanged" bracketing every other negative-direction check
         # in this file already uses (see test 1's own "else" branch above,
-        # test_c12:135-149) -- entity_a is freshly created and untouched,
+        # `test_c12_capability_agreement.py::test_declared_mutation_operations_match_observed_behavior`) -- entity_a is freshly created and untouched,
         # so its row count must still be 0 whichever honest form (below)
         # this adapter takes.
         count_before = adapter.count(fx.runtime_a, entity_a)

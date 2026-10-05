@@ -191,7 +191,7 @@ def test_probe_does_not_clear_prepared_statements():
     Uses `autocommit=False` deliberately (not `True`, unlike the sibling
     tests below): F2's `rollback()`-clears-prepared behaviour only fires
     when the connection is NOT already IDLE at the moment `rollback()`
-    runs (`_connection_base.py`:617's own early return) -- in `autocommit
+    runs (`psycopg`'s `_connection_base.py::BaseConnection._rollback_gen`'s own early return) -- in `autocommit
     =True` mode a connection is IDLE again immediately after every
     statement, so `rollback()` there would always take that early-return
     path and never actually exercise F2, making mutation M11

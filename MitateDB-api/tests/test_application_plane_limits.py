@@ -97,8 +97,8 @@ def test_gate_denies_requests_per_minute_before_concurrency():
     by a genuinely DIFFERENT credential) is denied `requests_per_minute`,
     never `concurrency` -- proving the rate window is checked before the
     concurrency slot (design D-1's own real order, r2db `service.py::
-    _slot`'s `_acquire_rate` call, `:1156-1163`, preceding its own
-    concurrency-counter acquisition, `:1133-1144`).
+    DataService._slot`'s `_acquire_rate` call, preceding its own
+    concurrency-counter acquisition).
 
     Pre-rework, this specific pair of classes had no peer-local test at
     all -- the code review that sent this WP back found that swapping
@@ -291,11 +291,11 @@ def test_request_limits_leaf_preserves_cell_facade():
     so `ApplicationCell._limit_gate`'s own bare calls to them (`cell.py`)
     and any EXISTING caller that already imports either name from
     `cell.py` keep working with no change to their own import line (this
-    file's own import at L41 is not such a caller -- it is new, added by
+    file's own `from mitatedb_api.cell import ...` line is not such a caller -- it is new, added by
     this WP to reach `_check_operation_depth` directly for the tests
     below). Dropping either name from `cell.py`'s own facade import
     breaks this identity check, and also breaks collection of this
-    test module, since that same import line is where L41 reads both
+    test module, since that same import line is where it reads both
     names from."""
     from mitatedb_api.request_limits import (
         _check_operation_depth as leaf_check_operation_depth,
@@ -644,7 +644,7 @@ def test_execution_ms_pg_lock_timeout_maps_to_limit_exceeded_via_transact(platfo
 
 def test_request_bytes_dual_layer_responses_are_identical(platform, app_a):
     """design D-1 "HTTP面の二重化について": the ASGI byte-count middleware
-    (real bytes, `http.py:208`) and the in-process structural estimate
+    (real bytes, `http.py::RequestByteBoundMiddleware`) and the in-process structural estimate
     (`request_limits.py::_measure_request_bytes`, reached via `ApplicationCell.
     _limit_gate`) measure DIFFERENT quantities of the SAME class --
     "whichever crosses its own bound first rejects". This fixture sets

@@ -726,8 +726,8 @@ def test_isolated_surface_surfaces_value_hook_is_load_bearing(adapter_name: str,
     surface's own composition actually called `iso._surfaces_value()`
     (design D-1 (A) 6 point (c)).
 
-    mutation (`conformance_adapter_r2db_http.py:2134` /
-    `conformance_adapter_mitatedb_http.py:1683`): revert
+    mutation (`conformance_adapter_r2db_http.py::isolated_application_surface` /
+    `conformance_adapter_mitatedb_http.py::isolated_application_surface`): revert
     `isolated_application_surface`'s own `surfaces=iso._surfaces_value()`
     (r2db) / `_iso_surfaces = iso._surfaces_value()` (MitateDB) to a
     direct reference to this module's own unchanged `_SURFACES` constant /

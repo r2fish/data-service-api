@@ -452,7 +452,7 @@ _DIR_PREFIXES = {
 
 # D-3: extraction is limited to spans whose name (or, for the bare-file form,
 # whose path basename) starts with `test_` -- a span that does not is not a
-# test-name reference at all (D-3 (e); CONDITIONS.md:41's `cell.py::_where`
+# test-name reference at all (D-3 (e); CONDITIONS.md's C-12 row's `cell.py::_where`
 # is the real example: an implementation-code citation, not a test).
 _THREE_LEVEL_FORM_RE = re.compile(r"^(\S+\.py)::([A-Za-z_]\w*)::(test_\w+)$")
 _FULL_FORM_RE = re.compile(r"^(\S+\.py)::(test_\w+)$")
@@ -655,7 +655,7 @@ def _extract_references(line: str) -> tuple[list[tuple], list[str]]:
 def _iter_nonblank_lines(text: str):
     """D-2: every non-blank line, not only `|`-started table rows -- the
     real file's own preamble carries 3 test-name references outside the
-    table (`conformance-tests/CONDITIONS.md` `:16`, `:22`, `:61`)."""
+    table (three places in `conformance-tests/CONDITIONS.md`)."""
     for i, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
@@ -802,7 +802,7 @@ def test_conditions_md_allowlist_matches_known_non_test_name_spans():
 
 def test_conditions_md_has_out_of_table_test_name_references():
     """D-2: the real file carries at least one test-name reference OUTSIDE
-    the `|`-started table -- measured directly: 3 (`conformance-tests/CONDITIONS.md` `:16`, `:22`, `:61`)."""
+    the `|`-started table -- measured directly: 3 (in `conformance-tests/CONDITIONS.md`)."""
     text = TEST_NAME_RESOLUTION_TARGET_PATH.read_text()
     out_of_table = [
         (line_num, ref)
@@ -842,8 +842,8 @@ def test_fixture_async_def_test_is_indexed_and_resolves():
 def test_fixture_implementation_code_reference_is_not_extracted():
     """D-3 (e): a backtick span whose name has no `test_` prefix (and whose
     path's own basename does not either) is never extracted as a reference
-    at all -- matches the real file's own `cell.py::_where` (CONDITIONS.md
-    line 41)."""
+    at all -- matches the real file's own `cell.py::_where` (CONDITIONS.md's
+    C-12 row)."""
     refs, allow = _extract_references("An implementation-code citation `cell.py::_where`, no test_ prefix anywhere.")
     assert refs == []
     assert allow == []

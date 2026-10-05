@@ -510,7 +510,7 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
 
 # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
 # WP-6d-ii): `hold_after_idempotency_lookup` realization for this
-# in-process plug. `ApplicationCell._idempotency_check` (`cell.py:1201`)
+# in-process plug. `ApplicationCell._idempotency_check` (`cell.py::ApplicationCell._idempotency_check`)
 # is the ONE choke every keyed entry point calls -- it performs BOTH the
 # lookup AND the `idempotency_entries` reservation and returns `(replay_
 # response, digest, now_ms)`; a fresh admission is exactly the case
@@ -1264,12 +1264,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             max_schema_objects=20,
             # Phase 8 WP-1a (design D-1 実装の形 7): all 4 new count values
             # stay <= `_MAX_EXERCISABLE_LIMIT` (200, `test_c05_limit_
-            # declaration_agreement.py:70`). `concurrency=3`: `hold_in_
+            # declaration_agreement.py::_MAX_EXERCISABLE_LIMIT`). `concurrency=3`: `hold_in_
             # flight` (WP-1b) genuinely holds this many threads/connections
             # open, so a small, realistic count keeps the drive cheap.
             # `requests_per_minute=50` matches r2db's own 2 plug isolated
-            # values (`conformance_adapter_r2db.py:150`/`conformance_
-            # adapter_r2db_http.py:757`) -- the rate-headroom assert WP-1b
+            # values (`conformance_adapter_r2db.py::_ISOLATED_APPLICATION_LIMITS`/`conformance_
+            # adapter_r2db_http.py::_ISOLATED_APPLICATION_LIMITS`) -- the rate-headroom assert WP-1b
             # adds needs room above `concurrency`'s own bound. `execution_
             # ms=5000` mirrors this same profile's r2db counterpart
             # (unused by any V2 driver -- `reference_wall_clock`, never
@@ -2115,7 +2115,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
 
             # Phase 8 WP-1 rework 2 (裁定 1, 監督裁定 2026-09-07): return the
             # real number of rows affected (port `adapter.py`'s own
-            # `attempt_mutation` docstring, ~:2028: "return the number of
+            # `attempt_mutation` docstring (`adapter.py::ConformanceAdapter.attempt_mutation`): "return the number of
             # rows affected"), not `len(results)` (= the number of batch
             # OPERATIONS, always 1 here since this dispatcher only ever
             # submits a single-item batch). `results[0]` is exactly the
@@ -2812,7 +2812,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     ) -> Mapping[str, Any]:
         """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
         §7 段 (9)): `attempt_filter`'s own `filters` construction, presented
-        to `session.read_with_result` (`cell.py:3664`) together with that
+        to `session.read_with_result` (`cell.py::ApplicationRuntime.read_with_result`) together with that
         SAME method's pre-existing `order_by`/`limit`/`budget` keywords --
         all three already live there (unchanged by this WP), exactly as
         `query_with_budget` above already presents `budget` alone to the
@@ -2869,7 +2869,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         non-`None` cursor (design D-2b.1); this adapter fabricates
         nothing on its own. `order_by` is the SAME wire-shaped
         `[{"field":..., "direction":...}]` list `_bind_order_by` already
-        accepts (`cell.py:3147`)."""
+        accepts (`cell.py::ApplicationCell._bind_order_by`)."""
         filters = [Filter(f, op, v) for f, op, v in where] if where else None
         order = [{"field": f, "direction": d} for f, d in order_by] if order_by else None
         kwargs: dict[str, Any] = {}

@@ -1488,8 +1488,7 @@ def _iter_field_definitions(paths: list[Path], field: str) -> list[tuple[str, Pa
 # dict named `operation` -- never an audit field -- and keyword-only-ifying
 # them would change a public/semi-public call signature (an ABC's own
 # abstract signature, or `DataService.schema`'s established `service.schema
-# (context, body, request_id=...)` positional-call convention, `http.py:
-# 355`) for no audit-safety benefit. Each entry names its qualified
+# (context, body, request_id=...)` positional-call convention, `http.py::post_schema`) for no audit-safety benefit. Each entry names its qualified
 # definition and its rationale; the two validation tests immediately below
 # hold this list itself accountable: (i) every entry must still resolve to
 # a real `operation`-parameter definition (a renamed/removed function goes
@@ -2752,11 +2751,13 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # adding: the two peers' own exception vocabulary (r2db's `fail()`,
     # MitateDB's `errors.ValidationError`) is kept OUT of the pinned
     # function bodies on both sides -- each peer raises its own locally
-    # named `_ConstraintDeclarationError` (never surfaced past its own
-    # module) from inside the pinned function, and each peer's own direct
-    # caller (`structured._fail_constraint_declaration` / `cell._validate_
-    # enum_declaration_with_path`) is the one place that translates it to
-    # the peer's own public denial shape -- so the difference the two
+    # named `_ConstraintDeclarationError` from inside the pinned function
+    # (an internal signal no public response carries: r2db's call sites in
+    # `structured.py`/`postgres.py` catch it and translate it through
+    # `schema_binding.py::_fail_constraint_declaration`, MitateDB-api's
+    # `constraint_resolution.py::_validate_enum_declaration_with_path`
+    # catches it and translates it) -- each translation lands on the
+    # peer's own public denial shape, so the difference the two
     # peers' error handling genuinely has never enters text this
     # comparison reads.
     ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "validate_enum_declaration"),
@@ -4334,10 +4335,10 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
 # all -- `ControlPlaneLimits(...)`'s construction (§4 lines ~315-323) built
 # every field except `request_bytes` from an env var, leaving that one
 # field permanently pinned to the dataclass default (1_048_576). MitateDB's
-# `control_composition.py:128` (`MITATEDB_CONTROL_REQUEST_BYTES_LIMIT`)
+# `control_composition.py::build_control_service` (`MITATEDB_CONTROL_REQUEST_BYTES_LIMIT`)
 # already wired the equivalent env var; this was the one peer-asymmetric
 # gap the ledger closure fixes. Same name as MitateDB-api's own
-# `tests/test_control_main.py:165` `test_build_control_app_request_bytes_
+# `tests/test_control_main.py::test_build_control_app_request_bytes_
 # limit_matches_the_declared_one` (work order §4 WP-B3 completion condition
 # 7: "MitateDB tests/test_control_main.py:165 と同名・同形").
 # ===========================================================================
@@ -4353,7 +4354,7 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(platform
     the declared number without also wiring what `create_control_app`
     passes to the middleware would pass a naive "declaration changed" check
     while leaving the OLD bound silently enforced). `create_control_app`
-    (`control_http.py:430`) reads `control_service.limits` directly -- the
+    (`control_http.py::create_control_app`) reads `control_service.limits` directly -- the
     SAME `ControlPlaneLimits` instance `capabilities()` reports from -- so
     both readings are, structurally, one source; this test is the
     behavioral proof of that, not a second, independent assumption."""

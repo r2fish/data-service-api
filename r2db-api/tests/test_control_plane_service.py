@@ -1134,7 +1134,8 @@ def test_known_locator_wrong_secret_denial_stays_unattributed_despite_the_visibl
 @pytest.mark.parametrize("kind", BACKENDS)
 def test_authenticate_application_on_the_control_backend_accepts_the_verbatim_composed_bearer(kind, platform):
     """Phase 6 WP-2 (design D-1(c)): `ControlBackend.authenticate_
-    application` (`control_plane.py:515-525`, used by `audit_query`'s own
+    application` (`control_plane.py::InMemoryControlBackend.authenticate_application` /
+    `PostgresControlBackend.authenticate_application`, used by `audit_query`'s own
     "is this secret actually an application credential" probe, D-5) MUST
     NOT be a locator-unaware "片肺" (half) of D-1 -- it delegates to the
     SAME `self._credentials` store `issue_credential`/`rotate_credential`

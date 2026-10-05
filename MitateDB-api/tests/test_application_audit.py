@@ -2288,7 +2288,8 @@ def test_role_denied_is_durably_recorded() -> None:
     `Role.RUNTIME` nor `Role.DEVELOPER` (a forged/corrupted session,
     since `auth.Principal` is a plain, unvalidated dataclass -- the same
     forging technique the in-process conformance adapter's own negative
-    tests already use, `conformance_adapter_mitatedb.py:1290/1302`)."""
+    tests already use, `conformance_adapter_mitatedb.py::MitateDBConformanceAdapter.tamper_vectors`
+    (its `forged_scope_attempt` / `role_elevation_attempt`))."""
     sink = ApplicationAuditSink()
     router = make_router(sink)
     cell = ApplicationCell("appone", FoundationConfig(), backend=SQLiteBackend(), audit_router=router)

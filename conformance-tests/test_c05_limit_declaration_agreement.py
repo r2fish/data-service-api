@@ -427,7 +427,7 @@ def _drive_requests_per_minute(adapter: ConformanceAdapter) -> bool:
         # is no longer true after 裁定 3 -- `capabilities()`/`catalog()`/
         # `schema_revision()` are now wrapped by `_limit_gate` (rate/
         # concurrency only) on BOTH MitateDB surfaces, matching r2db's own
-        # `capabilities()` (`r2db_api/service.py:709`, inside `_slot`) -- so
+        # `capabilities()` (`r2db_api/service.py::DataService.capabilities`, inside `_slot`) -- so
         # `HttpService.authenticate`'s own `GET /v1/capabilities` round
         # trip now consumes exactly 1 unit of the SAME `requests_per_
         # minute` window this drive measures, under the SAME runtime
@@ -517,7 +517,7 @@ def _drive_request_bytes(adapter: ConformanceAdapter) -> bool:
         # `_MAX_EXERCISABLE_LIMIT` is not applied here (unlike every
         # COUNT-valued class below): it is a count-class ceiling ("a
         # theoretically-finite bound too large to actually drive over in
-        # one test run" -- C-14:476's own rationale), and a byte-valued
+        # one test run" -- `test_c14_authority_boundary.py::test_c14_resource_bounds_published_and_enforced`'s own rationale), and a byte-valued
         # class needs a materially larger absolute number to leave
         # ordinary setup traffic (this profile's own `create_entity`/
         # `insert` calls) room to fit under it at all -- this file's own
@@ -552,8 +552,7 @@ def _drive_result_items(adapter: ConformanceAdapter) -> bool:
     `limit` keyword removes that port-shape gap entirely, and the two
     peers' own real checks (measured, design D-2/§6.2) agree at the
     SAME N/N+1 position for this recipe: r2db checks `min(len(rows),
-    page_size)` against the bound (`postgres.py:1224`/`structured.py:
-    923`) -- with `bound+1` ACTUAL rows present, `min(bound+1,
+    page_size)` against the bound (`postgres.py::PostgresCell.query`/`structured.py::ApplicationCell.query`) -- with `bound+1` ACTUAL rows present, `min(bound+1,
     page_size)` equals `page_size` for both `page_size=bound` (succeeds)
     and `page_size=bound+1` (denied); MitateDB checks the REQUESTED
     `limit` value directly, independent of how many rows actually match
@@ -926,10 +925,10 @@ def test_c05_v1_d_unavailable_class_may_still_publish_a_limits_value(adapter: Co
     # test's own former docstring named it explicitly). Phase 8 WP-1a
     # rework 1 (裁定 1, 監督裁定 2026-09-06) then flipped this same peer's
     # `operation_depth` to `enforced` too (measured: `_check_operation_
-    # depth` genuinely runs in-process via `_limit_gate`, wired at
-    # `cell.py:531`, and traverses the real request dict every in-process
+    # depth` genuinely runs in-process via `_limit_gate`, wired in
+    # `cell.py::ApplicationCell._limit_gate`, and traverses the real request dict every in-process
     # `insert`/`update`/`delete`/`transact` call site builds -- see that
-    # class's own `limit_enforcement` comment, `cell.py:1875-1926` (now in `capabilities_document.py`), for
+    # class's own `limit_enforcement` comment (now in `capabilities_document.py::build_capabilities_document`), for
     # the full trace), so as of Phase 8 WP-1 rework 3 (裁定 3, 監督裁定
     # 2026-09-07) the combination is observed on NEITHER class, on NO
     # plug. The PROPOSITION this control protected -- V1 (d): an
@@ -958,7 +957,7 @@ def test_c05_v2_declaration_and_position_agree(adapter: ConformanceAdapter) -> N
     check) -- one assertion, this one, now carries condition 12 alone."""
     driven = {name: driver(adapter) for name, driver in _V2_DRIVERS.items()}
     driven_classes = sorted(name for name, ok in driven.items() if ok)
-    # per-plug non-vacuity (condition 12, C-17:182-218 precedent): a
+    # per-plug non-vacuity (condition 12, `test_c17_declaration_agreement.py::test_declared_entities_satisfy_declaration_required_completeness` precedent): a
     # session-crossing aggregate guard does not work under `-n 5
     # --dist loadgroup` (each plug is its own xdist group/worker) -- this
     # asserts non-vacuity WITHIN this one plug's own test.
@@ -1192,15 +1191,15 @@ def test_c05_l7_21_adapter_name_reads_are_allowlisted() -> None:
 # `delete` take positional/keyword ARGUMENTS, not a single dict") was
 # factually wrong, per the code review that sent WP-1a back: `_limit_gate`
 # is passed a REAL dict on every one of those call sites (`insert` builds
-# `{"collection": ..., "values": ...}`, `cell.py:770`; `update`/`delete`
+# `{"collection": ..., "values": ...}`, `cell.py::ApplicationCell.insert`; `update`/`delete`
 # likewise). Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06) wired
-# `_check_operation_depth` into `_limit_gate` (`cell.py:531`) for BOTH
+# `_check_operation_depth` into `_limit_gate` (`cell.py::ApplicationCell._limit_gate`) for BOTH
 # surfaces and measured it directly: with the default `max_operation_
 # depth=8`, a bare `session.insert("t", {"doc": <7-levels-deep value>})`
 # deterministically raises `LIMIT_EXCEEDED`/`operation_depth`, in-process,
 # no HTTP transport involved. `("MitateDB-api", "operation_depth")` is
 # therefore ALSO removed -- `cell.py`'s own `limit_enforcement` comment
-# (`cell.py:1875-1926`) (now in `capabilities_document.py`) has the full trace, including the one real
+# (now in `capabilities_document.py::build_capabilities_document`) has the full trace, including the one real
 # asymmetry that DOES remain between the two surfaces (which port
 # ENTRY POINT a depth attack must use, not whether the peer enforces the
 # bound at all).

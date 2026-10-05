@@ -34,7 +34,7 @@ territory -- not duplicated here):
        effects -- never skipped. The `unavailable`-other branch (currently
        unreached by any registered adapter, kept honest for a future one)
        asserts a resend of the SAME key returns the SAME result. Per-plug
-       non-vacuity (C-17:182-218 precedent): each plug's own test asserts
+       non-vacuity (`test_c17_declaration_agreement.py::test_declared_entities_satisfy_declaration_required_completeness` precedent): each plug's own test asserts
        that ONE of the two branches was actually observed within that
        plug's own run -- a session-crossing aggregate guard does not work
        under `-n 5 --dist loadgroup` (each plug is its own xdist group).

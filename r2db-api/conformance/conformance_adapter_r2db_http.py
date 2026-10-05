@@ -933,7 +933,7 @@ class _RolePoolStatementMeter:
 
 # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
 # WP-6d-ii): `hold_after_idempotency_lookup` realization for this HTTP
-# plug. `PostgresCell._idempotency_key_lock` (`postgres.py:1566`/`:2264`)
+# plug. `PostgresCell._idempotency_key_lock` (`postgres.py::PostgresCell.transact`/`.apply_schema` call it)
 # takes a `pg_advisory_xact_lock` on this key BEFORE `_idempotency_
 # lookup` is ever called, so a second, key-matching request ("B") blocks
 # at the DATABASE level -- inside its own `_idempotency_key_lock` call --
@@ -1887,7 +1887,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # with no real socket and no per-loop connection pool to
             # mismatch; on this repo's real-socket subclass (`R2DBSocket
             # ConformanceAdapter`), `_LazySocketClient.send` (`conformance_
-            # adapter_r2db_socket.py:389-472`, WP-4a) opens a FRESH,
+            # adapter_r2db_socket.py::_LazySocketClient.send`, WP-4a) opens a FRESH,
             # one-shot `httpx.AsyncHTTPTransport` per call instead of
             # holding a persistent pool on `self`, so there is likewise no
             # loop-affine state to cross a loop boundary -- every PRE-
@@ -2004,7 +2004,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             body["where"] = where
         # port v1.18 (design D-4, C-30): `order_by` is the SAME wire-shaped
         # `QueryRequest.order_by` array `post_query` already accepts
-        # (`r2db-api/src/r2db_api/http.py:468`) -- no prior caller of this
+        # (`r2db-api/src/r2db_api/http.py::post_query`) -- no prior caller of this
         # method carried it.
         if order_by is not None:
             body["order_by"] = order_by
@@ -2802,7 +2802,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
     # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
     # SAME per-application `PostgresCell.catalog()` `DataService._slot`'s
-    # own dispatch calls into (`service.py:942`), after the concurrency
+    # own dispatch calls into (`service.py::DataService.catalog`), after the concurrency
     # counter's own increment and BEFORE any backend/DB call (`catalog()`
     # opens its own live connection, bounded by the same per-transaction
     # `statement_timeout`/`lock_timeout` the other 3 operations carry).
@@ -2833,8 +2833,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
     # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
     # WP-6d-ii): wraps the SAME per-application `PostgresCell`'s own
-    # `_idempotency_lookup`/`_idempotency_reserve` (`postgres.py:1283`/
-    # `:1296`). See `_hold_after_idempotency_lookup_via_stalled_cell_
+    # `_idempotency_lookup`/`_idempotency_reserve` (both on
+    # `postgres.py::PostgresCell`). See `_hold_after_idempotency_lookup_via_stalled_cell_
     # methods`'s own module comment for why the REAL `pg_advisory_xact_
     # lock` this cell already takes (WP-6d-i), not any state this hook
     # holds, is what a concurrent second request actually waits on.
@@ -3202,7 +3202,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         # port v1.12 (L7-21): `limit` maps directly onto `_query_request`'s
-        # own pre-existing `page_size` keyword (`:1308`, unchanged by this
+        # own pre-existing `page_size` keyword (unchanged by this
         # WP), which in turn puts `{"page": {"size": page_size}}` on the
         # real wire body (`QueryRequest.page.size`, `spec/data-service-
         # api.v1.json`) -- `None` omits it, exactly as every pre-v1.12
@@ -3886,7 +3886,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     ) -> Mapping[str, Any]:
         """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
         §7 段 (9)): `attempt_filter`'s own `where` construction, presented
-        to `_query_request` (`:1672`) together with that SAME helper's
+        to `_query_request` together with that SAME helper's
         pre-existing `page_size` keyword and its `extra_body` merge -- the
         latter carries `order_by` (`_query_request` has no dedicated
         keyword for it) and `budget` onto the real wire body's top level,
@@ -3943,7 +3943,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         `where`/`order_by`/`page.size`/`page.cursor`/`budget` fields
         through `_query_request`'s own real `POST .../query` entry point,
         verbatim -- `cursor` maps onto that method's own pre-existing
-        keyword (`:1680`, added for `count()`'s own `next_page`-following
+        keyword (added for `count()`'s own `next_page`-following
         fallback), `order_by` onto the keyword this WP added immediately
         above."""
         assert isinstance(session, _Session)

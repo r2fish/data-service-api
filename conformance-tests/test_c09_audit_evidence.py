@@ -404,8 +404,8 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
     # 形" names), never by a value this test injected into row data riding
     # along as `target_id` -- `target_id` is contract-reserved for a
     # single target CREDENTIAL/APPLICATION id (`audit.fields_note`), never
-    # a data row key (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md:
-    # 438 "target_id は当面すべて NULL になる").
+    # a data row key (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md,
+    # its "target_id は当面すべて NULL になる" paragraph).
     session = fx.runtime_a
     entity = fx.shared_entity
     marker = fresh_identifier("c09v1")

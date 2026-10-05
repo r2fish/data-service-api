@@ -442,8 +442,8 @@ def test_ceiling_asymmetric_declaration_maps_through_a_real_composition_root_dat
     row (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (4)), which
     holds at any declared ceiling.
 
-    Mutation: swapping `main.py:437`'s `declarations.process_ceilings.
-    data` for `.control` (or for a literal `1`) makes this test's own
+    Mutation: swapping the `process_ceiling=declarations.process_ceilings.
+    data` keyword `main.py::build_app` passes to `ApplicationCell` for `.control` (or for a literal `1`) makes this test's own
     `deployment_required` assertion fail -- `test_process_ceilings_
     declaration.py`'s pre-existing `_data_plane_limit_enforcement`-based
     tests above cannot catch this because they never go through
